@@ -1,5 +1,9 @@
 # Releases
 
+## v0.2.3
+
+- Use `core-markdown` in place of `socketry-markdown`.
+
 ## v0.2.2
 
 - Expose the descriptive `UpdateSummary` result type while preserving `Update` as a compatibility alias.
