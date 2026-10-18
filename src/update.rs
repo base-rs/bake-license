@@ -4,7 +4,7 @@
 use crate::authorship::{self, Copyright};
 use crate::source;
 use bake::{Error, Result};
-use socketry_markdown::{ParseOptions, mdast::Node, to_mdast};
+use core_markdown::{ParseOptions, mdast::Node, to_mdast};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -123,7 +123,7 @@ fn remove_license_section(document: &str) -> String {
 
 fn remove_parsed_license_section(
     document: &str,
-    parsed: std::result::Result<Node, socketry_markdown::message::Message>,
+    parsed: std::result::Result<Node, core_markdown::message::Message>,
 ) -> String {
     let Ok(root) = parsed else {
         return document.to_owned();
@@ -246,8 +246,8 @@ mod tests {
     use super::*;
     use crate::authorship::Copyright;
     use crate::test_support::GitRepository;
-    use socketry_markdown::mdast::{Heading, Node, Root, Text};
-    use socketry_markdown::unist::Position;
+    use core_markdown::mdast::{Heading, Node, Root, Text};
+    use core_markdown::unist::Position;
     use std::fs;
     use tempfile::tempdir;
 
@@ -298,8 +298,8 @@ mod tests {
         }
     }
 
-    fn message() -> socketry_markdown::message::Message {
-        socketry_markdown::message::Message {
+    fn message() -> core_markdown::message::Message {
+        core_markdown::message::Message {
             place: None,
             reason: "invalid markdown".to_owned(),
             rule_id: Box::new("test".to_owned()),

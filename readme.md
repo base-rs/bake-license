@@ -26,13 +26,17 @@ The task updates `license.md` and tracked Rust source headers, honoring `.mailma
 
 ## Releasing
 
-Prepare a release with `cargo bake cargo:version:patch` (or `minor`, `major`, or `bump --version X.Y.Z`), then run `cargo bake cargo:release` and open a pull request. After review and merge, GitHub Actions publishes the release when the configured `crates-io` environment approves it. Follow the shared [Releasing skill](https://github.com/socketry/socketry-project-rust/blob/main/context/releasing.md) for the standard process.
+Prepare a release with `cargo bake cargo:version:patch` (or `minor`, `major`, or `bump --version X.Y.Z`), commit with a `Release: vVERSION` trailer, then run `cargo bake cargo:release` and open a pull request. After review and merge, GitHub Actions publishes the release when the configured `crates-io` environment approves it. Follow the shared [Releasing skill](https://github.com/core-rs/core-project/blob/main/context/releasing.md) for the standard process.
 
 ## Releases
 
 <!-- bake-readme:releases:start -->
 
 See [releases.md](releases.md) for the full release history.
+
+### v0.2.3
+
+- Use `core-markdown` in place of `socketry-markdown`.
 
 ### v0.2.2
 
@@ -48,23 +52,20 @@ See [releases.md](releases.md) for the full release history.
 
 - Update the usage example and document shared agent context setup.
 
-### v0.2.0
-
-- Remove the redundant `bake_license::license` module. Use the root API and `license:update` task instead.
-
 <!-- bake-readme:releases:end -->
 
 ## See Also
 
-- [Bake](https://github.com/socketry/bake-rust) — composable development tasks for Rust projects.
-- [socketry-project](https://github.com/socketry/socketry-project-rust) — shared project tasks and conventions for Socketry Rust crates.
+- [Bake](https://github.com/core-rs/bake) — composable development tasks for Rust projects.
+
+- [core-project](https://github.com/core-rs/core-project) — shared project tasks and conventions for Core Rust crates.
 
 ## Contributing
 
-Please open an issue or pull request on [GitHub](https://github.com/socketry/bake-license-rust).
+Please open an issue or pull request on [GitHub](https://github.com/core-rs/bake-license).
 
 ### Agent Context
 
 Run `cargo bake agent:context:install` to install shared context and skills. Read `.agents/context/index.md` to find relevant guides, follow `agents.md` if present, and apply skills under `.agents/skills/`. The installer preserves repository-owned `agents.md`; it does not create or regenerate that file.
 
-[Agent Context guide]: https://github.com/socketry/bake-agent-context-rust/blob/main/context/agent-context.md
+[Agent Context guide]: https://github.com/core-rs/bake-agent-context/blob/main/context/agent-context.md
