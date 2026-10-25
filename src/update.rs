@@ -4,7 +4,7 @@
 use crate::authorship::{self, Copyright};
 use crate::source;
 use bake::{Error, Result};
-use core_markdown::{
+use base_markdown::{
     Document, ParseOptions,
     stream::{EventKind, Tag},
 };

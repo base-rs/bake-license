@@ -1,9 +1,9 @@
 [package]
 name = "bake-license"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/core-rs/bake-license"
+repository = "https://github.com/base-rs/bake-license"
 description = "License and copyright maintenance tasks for Bake"
 readme = "readme.md"
 include = ["src/**", "Cargo.toml", "readme.md", "license.md", "releases.md"]
@@ -16,13 +16,13 @@ resolver = "3"
 manifest = "bake/Cargo.toml"
 
 [workspace.metadata.bake.release]
-reviewers = ["core-rs/maintainers"]
+reviewers = ["base-rs/maintainers"]
 
 [lib]
 name = "bake_license"
 
 [dependencies]
-core-markdown = "0.2.0"
+base-markdown = "0.1.0"
 bake = "0"
 tempfile = "3.27"
 
