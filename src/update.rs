@@ -4,7 +4,10 @@
 use crate::authorship::{self, Copyright};
 use crate::source;
 use bake::{Error, Result};
-use core_markdown::{ParseOptions, mdast::Node, to_mdast};
+use core_markdown::{
+    Document, ParseOptions,
+    stream::{EventKind, Tag},
+};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -117,67 +120,42 @@ fn license_document(copyrights: &[Copyright]) -> String {
     output
 }
 
-fn remove_license_section(document: &str) -> String {
-    remove_parsed_license_section(document, to_mdast(document, &ParseOptions::default()))
-}
-
-fn remove_parsed_license_section(
-    document: &str,
-    parsed: std::result::Result<Node, core_markdown::message::Message>,
-) -> String {
-    let Ok(root) = parsed else {
-        return document.to_owned();
-    };
-    let Some(children) = root.children() else {
-        return document.to_owned();
-    };
-
-    let mut output = String::with_capacity(document.len());
+fn remove_license_section(source: &str) -> String {
+    let document = Document::parse(source, &ParseOptions::default())
+        .expect("the built-in Markdown parser produces a valid document");
+    let mut children = document.children(document.root());
+    let mut output = String::with_capacity(source.len());
     let mut copied_until = 0;
-
-    for (index, node) in children.iter().enumerate() {
-        let Node::Heading(heading) = node else {
+    while let Some(id) = children.next() {
+        let node = document.node(id).unwrap();
+        let EventKind::Start(Tag::Heading(level)) = node.kind else {
             continue;
         };
-        if !heading_text(node).eq_ignore_ascii_case("license") {
+        let text = document.text_content(id);
+        let title = text
+            .strip_suffix("\r\n")
+            .or_else(|| text.strip_suffix(['\r', '\n']))
+            .unwrap_or(&text);
+        if !title.eq_ignore_ascii_case("license") || node.span.start < copied_until {
             continue;
         }
-        let Some(position) = node.position() else {
-            continue;
-        };
-        let start = position.start.offset;
-        if start < copied_until {
-            continue;
-        }
-
         let end = children
-            .iter()
-            .skip(index + 1)
+            .clone()
             .find_map(|next| {
-                let Node::Heading(next_heading) = next else {
-                    return None;
-                };
-                (next_heading.depth <= heading.depth)
-                    .then(|| next.position().map(|position| position.start.offset))
-                    .flatten()
+                let node = document.node(next).unwrap();
+                match node.kind {
+                    EventKind::Start(Tag::Heading(next_level)) if next_level <= level => {
+                        Some(node.span.start)
+                    }
+                    _ => None,
+                }
             })
-            .unwrap_or(document.len());
-
-        output.push_str(&document[copied_until..start]);
+            .unwrap_or(source.len());
+        output.push_str(&source[copied_until..node.span.start]);
         copied_until = end;
     }
-
-    output.push_str(&document[copied_until..]);
+    output.push_str(&source[copied_until..]);
     output
-}
-
-fn heading_text(node: &Node) -> String {
-    let text = node.text_content();
-    text.strip_suffix("\r\n")
-        .or_else(|| text.strip_suffix('\n'))
-        .or_else(|| text.strip_suffix('\r'))
-        .unwrap_or(text.as_str())
-        .to_owned()
 }
 
 fn replace_if_changed(path: &Path, contents: &str) -> Result<bool> {
@@ -246,8 +224,6 @@ mod tests {
     use super::*;
     use crate::authorship::Copyright;
     use crate::test_support::GitRepository;
-    use core_markdown::mdast::{Heading, Node, Root, Text};
-    use core_markdown::unist::Position;
     use std::fs;
     use tempfile::tempdir;
 
@@ -298,34 +274,6 @@ mod tests {
         }
     }
 
-    fn message() -> core_markdown::message::Message {
-        core_markdown::message::Message {
-            place: None,
-            reason: "invalid markdown".to_owned(),
-            rule_id: Box::new("test".to_owned()),
-            source: Box::new("test".to_owned()),
-        }
-    }
-
-    fn heading(title: &str, depth: u8, start: Option<usize>) -> Node {
-        Node::Heading(Heading {
-            children: vec![Node::Text(Text {
-                value: title.to_owned(),
-                position: None,
-            })],
-            position: start
-                .map(|start| Position::new(1, start + 1, start, 1, start + 2, start + 1)),
-            depth,
-        })
-    }
-
-    fn root(children: Vec<Node>) -> Node {
-        Node::Root(Root {
-            children,
-            position: None,
-        })
-    }
-
     #[test]
     fn removes_the_license_section_until_the_next_equal_or_higher_heading() {
         let document = "# Project\n\n## License\n\nMIT terms.\n\n### Details\n\nMore terms.\n\n## Usage\n\nUse the project.\n";
@@ -364,64 +312,12 @@ mod tests {
     }
 
     #[test]
-    fn preserves_the_document_when_parsing_fails_or_returns_a_non_container() {
-        let document = "Keep this document.\n";
-        assert_eq!(
-            remove_parsed_license_section(document, Err(message())),
-            document
-        );
-        assert_eq!(
-            remove_parsed_license_section(
-                document,
-                Ok(Node::Text(Text {
-                    value: document.to_owned(),
-                    position: None,
-                }))
-            ),
-            document
-        );
-    }
-
-    #[test]
-    fn leaves_heading_nodes_without_source_positions_untouched() {
-        let document = "## License\n\nMIT terms.\n";
-        assert_eq!(
-            remove_parsed_license_section(document, Ok(root(vec![heading("License", 2, None)]))),
-            document
-        );
-    }
-
-    #[test]
-    fn removes_a_license_section_when_the_next_heading_has_no_position() {
-        let document = "Before.\n\n## License\n\nMIT terms.\n\n## Usage\n";
-        let start = document.find("## License").unwrap();
-        assert_eq!(
-            remove_parsed_license_section(
-                document,
-                Ok(root(vec![
-                    heading("License", 2, Some(start)),
-                    heading("Usage", 2, None),
-                ])),
-            ),
-            "Before.\n\n"
-        );
-    }
-
-    #[test]
-    fn strips_newline_suffixes_from_markdown_heading_text() {
-        for (text, expected) in [
-            ("License\r\n", "License"),
-            ("License\n", "License"),
-            ("License\r", "License"),
-            ("License", "License"),
-        ] {
-            assert_eq!(
-                heading_text(&Node::Text(Text {
-                    value: text.to_owned(),
-                    position: None,
-                })),
-                expected
-            );
+    fn removes_formatted_license_headings_and_preserves_nested_headings() {
+        for ending in ["\n", "\r", "\r\n"] {
+            let source = "# Project\n\n> ## License\n> Quoted terms.\n\n## **Lic&#101;nse**\n\nTerms.\n\n## Usage\n".replace('\n', ending);
+            let expected =
+                "# Project\n\n> ## License\n> Quoted terms.\n\n## Usage\n".replace('\n', ending);
+            assert_eq!(remove_license_section(&source), expected);
         }
     }
 

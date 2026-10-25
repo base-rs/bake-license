@@ -34,6 +34,10 @@ Prepare a release with `cargo bake cargo:version:patch` (or `minor`, `major`, or
 
 See [releases.md](releases.md) for the full release history.
 
+### v0.2.4
+
+- Migrate to the source-backed `core-markdown` document AST, preserving supported Markdown behavior and source bytes.
+
 ### v0.2.3
 
 - Use `core-markdown` in place of `socketry-markdown`.
@@ -41,16 +45,6 @@ See [releases.md](releases.md) for the full release history.
 ### v0.2.2
 
 - Expose the descriptive `UpdateSummary` result type while preserving `Update` as a compatibility alias.
-
-### v0.2.1
-
-- Resolve development task dependencies to the current checkout.
-
-- Adopt `socketry-project` 0.3.7 for shared project tasks and Markdown normalization.
-
-- Require the aggregate test and coverage result for pull request merges.
-
-- Update the usage example and document shared agent context setup.
 
 <!-- bake-readme:releases:end -->
 
