@@ -1,6 +1,6 @@
 [package]
 name = "bake-license"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/core-rs/bake-license"
@@ -22,7 +22,7 @@ reviewers = ["core-rs/maintainers"]
 name = "bake_license"
 
 [dependencies]
-core-markdown = "0.1.0"
+core-markdown = "0.2.0"
 bake = "0"
 tempfile = "3.27"
 
