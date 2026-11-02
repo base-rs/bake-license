@@ -1,6 +1,6 @@
 # Releases
 
-## Unreleased
+## v0.2.6
 
 - Leave generated Rust sources, whose leading comments say `@generated` or "do not edit", without license headers. Previously the update stamped a header onto Bake's generated task registry, which the next `cargo bake --regenerate` removed again.
 
