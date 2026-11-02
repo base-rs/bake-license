@@ -1,5 +1,9 @@
 # Releases
 
+## Unreleased
+
+- Leave generated Rust sources, whose leading comments say `@generated` or "do not edit", without license headers. Previously the update stamped a header onto Bake's generated task registry, which the next `cargo bake --regenerate` removed again.
+
 ## v0.2.5
 
 - Depend on `base-markdown` under the `base-rs` organization, replacing `core-markdown`.
