@@ -1,6 +1,6 @@
 # Releases
 
-## Unreleased
+## v0.2.7
 
 - Keep the blank line between leading documentation, such as module `//!` comments, and the code that follows when updating license headers, instead of removing it on every update.
 
