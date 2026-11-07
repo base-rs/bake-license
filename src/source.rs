@@ -28,12 +28,16 @@ pub(crate) fn update_source(contents: &str, copyrights: &[Copyright]) -> String 
     {
         documentation.remove(0);
     }
+    // Keep one blank line between the kept comments and the code when the source had one, such as after module documentation.
+    let mut separated = false;
     while documentation
         .last()
         .is_some_and(|line| clean_line(line).trim().is_empty())
     {
         documentation.pop();
+        separated = true;
     }
+    let separated = separated && !documentation.is_empty();
 
     let body_start = prefix_length
         + lines[prefix_length..]
@@ -62,6 +66,9 @@ pub(crate) fn update_source(contents: &str, copyrights: &[Copyright]) -> String 
 
     for line in documentation {
         output.push_str(line);
+    }
+    if separated {
+        output.push_str(newline);
     }
     for line in &lines[body_start..] {
         output.push_str(line);
@@ -228,6 +235,7 @@ mod tests {
                 "//! Module documentation.\n",
                 "/// Public API documentation.\n",
                 "// Keep this comment.\n",
+                "\n",
                 "pub fn example() {}\n",
             )
         );
@@ -282,5 +290,25 @@ mod tests {
         }
 
         assert_eq!(clean_line("// comment\r\n"), "// comment");
+    }
+
+    #[test]
+    fn keeps_the_blank_line_after_module_documentation() {
+        let contents = "// Released under the MIT License.\n// Copyright, 2024, by Alice.\n\n//! Module documentation.\n\nuse std::io;\n";
+        let updated = update_source(contents, &[copyright()]);
+        assert_eq!(
+            updated,
+            "// Released under the MIT License.\n// Copyright, 2020-2024, by Alice.\n\n//! Module documentation.\n\nuse std::io;\n"
+        );
+        assert_eq!(
+            update_source(&updated, &[copyright()]),
+            updated,
+            "updates are idempotent"
+        );
+        assert_eq!(
+            update_source("//! Docs.\nuse std::io;\n", &[copyright()]),
+            "// Released under the MIT License.\n// Copyright, 2020-2024, by Alice.\n\n//! Docs.\nuse std::io;\n",
+            "no blank line is added where there was none"
+        );
     }
 }
