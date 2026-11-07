@@ -1,5 +1,10 @@
 # Releases
 
+## Unreleased
+
+- Read contributions made outside the repository's Git history from `.contributors.toml`, so that copyright lines for work such as code ported from another project survive `license:update`. Each `[[contribution]]` gives an `author` with `name` and optional `email`, a `time`, and an optional `path`; it counts like a commit to that file, which must be tracked, or, without a path, to the repository's `license.md`. Authors are mapped through `.mailmap`, and bots are skipped. Malformed entries and untracked paths fail the update with their position.
+- Disable commit signing in the test fixtures' commits, so the tests no longer depend on the user's Git signing configuration.
+
 ## v0.2.7
 
 - Keep the blank line between leading documentation, such as module `//!` comments, and the code that follows when updating license headers, instead of removing it on every update.

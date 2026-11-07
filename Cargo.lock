@@ -58,6 +58,7 @@ dependencies = [
  "bake",
  "base-markdown",
  "tempfile",
+ "toml_edit",
 ]
 
 [[package]]

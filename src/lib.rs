@@ -2,7 +2,10 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! License and copyright maintenance tasks for Bake.
+//!
+//! Copyright lines are derived from the repository's Git history, honouring `.mailmap` and `.git-blame-ignore-revs`, together with contributions recorded outside it in `.contributors.toml`.
 mod authorship;
+mod contributors;
 mod source;
 mod update;
 mod update_summary;
@@ -15,7 +18,7 @@ pub use update_summary::UpdateSummary;
 /// Compatibility name for [`UpdateSummary`].
 pub use update_summary::UpdateSummary as Update;
 
-/// Refresh `license.md`, the README License section, and Rust source headers.
+/// Refresh `license.md`, the README License section, and Rust source headers, from Git history and `.contributors.toml`.
 #[bake::task(name = "license:update")]
 pub fn refresh(context: &mut bake::Context) -> bake::Result<String> {
     let summary = update(context.root())?;

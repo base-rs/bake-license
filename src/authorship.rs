@@ -1,6 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
+use crate::contributors::{Contribution, Contributors};
 use bake::{Error, Result};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -38,12 +39,18 @@ impl Copyright {
     }
 }
 
-pub(crate) fn repository(root: &Path) -> Result<Vec<Copyright>> {
-    collect(root, None)
+/// The repository's copyright: its whole Git history and every recorded contribution.
+pub(crate) fn repository(root: &Path, contributors: &Contributors) -> Result<Vec<Copyright>> {
+    collect(root, None, contributors.repository())
 }
 
-pub(crate) fn file(root: &Path, path: &Path) -> Result<Vec<Copyright>> {
-    collect(root, Some(path))
+/// A file's copyright: its Git history, following renames, and the recorded contributions naming it.
+pub(crate) fn file(
+    root: &Path,
+    path: &Path,
+    contributors: &Contributors,
+) -> Result<Vec<Copyright>> {
+    collect(root, Some(path), contributors.file(path))
 }
 
 pub(crate) fn rust_files(root: &Path) -> Result<Vec<String>> {
@@ -79,11 +86,19 @@ fn parse_rust_paths(output: &[u8]) -> Result<Vec<String>> {
     Ok(paths)
 }
 
-fn collect(root: &Path, path: Option<&Path>) -> Result<Vec<Copyright>> {
-    collect_with_git(root, path, "git")
+fn collect<'a>(
+    root: &Path,
+    path: Option<&Path>,
+    contributions: impl IntoIterator<Item = &'a Contribution>,
+) -> Result<Vec<Copyright>> {
+    let mut years = collect_with_git(root, path, "git")?;
+    for contribution in contributions {
+        years.add(contribution.author(), contribution.year());
+    }
+    Ok(years.into_copyrights())
 }
 
-fn collect_with_git(root: &Path, path: Option<&Path>, executable: &str) -> Result<Vec<Copyright>> {
+fn collect_with_git(root: &Path, path: Option<&Path>, executable: &str) -> Result<Years> {
     let ignored = ignored_revisions(root)?;
     let mut command = git_command(root, executable);
     command.args(["log", "--format=%H%x00%aN%x00%aI"]);
@@ -100,9 +115,35 @@ fn collect_with_git(root: &Path, path: Option<&Path>, executable: &str) -> Resul
     Ok(parse_git_log(&output.stdout, &ignored))
 }
 
-fn parse_git_log(output: &[u8], ignored: &HashSet<String>) -> Vec<Copyright> {
+/// Each author's first and last year of contribution.
+#[derive(Default)]
+struct Years(BTreeMap<String, (u16, u16)>);
+
+impl Years {
+    fn add(&mut self, author: &str, year: u16) {
+        self.0
+            .entry(author.to_owned())
+            .and_modify(|(first_year, last_year)| {
+                *first_year = (*first_year).min(year);
+                *last_year = (*last_year).max(year);
+            })
+            .or_insert((year, year));
+    }
+
+    fn into_copyrights(self) -> Vec<Copyright> {
+        let mut copyrights: Vec<_> = self
+            .0
+            .into_iter()
+            .map(|(author, (first_year, last_year))| Copyright::new(first_year, last_year, author))
+            .collect();
+        copyrights.sort();
+        copyrights
+    }
+}
+
+fn parse_git_log(output: &[u8], ignored: &HashSet<String>) -> Years {
     let output = String::from_utf8_lossy(output);
-    let mut years_by_author = BTreeMap::<String, (u16, u16)>::new();
+    let mut years = Years::default();
 
     for record in output.lines().filter(|line| !line.is_empty()) {
         let mut fields = record.split('\0');
@@ -127,21 +168,10 @@ fn parse_git_log(output: &[u8], ignored: &HashSet<String>) -> Vec<Copyright> {
             continue;
         };
 
-        years_by_author
-            .entry(author.to_owned())
-            .and_modify(|(first_year, last_year)| {
-                *first_year = (*first_year).min(year);
-                *last_year = (*last_year).max(year);
-            })
-            .or_insert((year, year));
+        years.add(author, year);
     }
 
-    let mut copyrights: Vec<_> = years_by_author
-        .into_iter()
-        .map(|(author, (first_year, last_year))| Copyright::new(first_year, last_year, author))
-        .collect();
-    copyrights.sort();
-    copyrights
+    years
 }
 
 fn ignored_revisions(root: &Path) -> Result<HashSet<String>> {
@@ -241,7 +271,7 @@ mod tests {
             "2024-04-05T06:07:08+00:00",
         );
 
-        let copyrights = super::repository(repository.root()).unwrap();
+        let copyrights = super::repository(repository.root(), &Contributors::default()).unwrap();
         assert_eq!(copyrights.len(), 1);
         assert_eq!(copyrights[0].statement(), "Copyright, 2018-2023, by Alice.");
     }
@@ -272,7 +302,12 @@ mod tests {
             "2024-03-04T05:06:07+00:00",
         );
 
-        let copyrights = file(repository.root(), Path::new("src/new.rs")).unwrap();
+        let copyrights = file(
+            repository.root(),
+            Path::new("src/new.rs"),
+            &Contributors::default(),
+        )
+        .unwrap();
         assert_eq!(
             copyrights
                 .iter()
@@ -317,7 +352,7 @@ mod tests {
     #[test]
     fn reports_git_and_ignore_file_failures() {
         let directory = tempfile::tempdir().unwrap();
-        assert!(repository(directory.path()).is_err());
+        assert!(repository(directory.path(), &Contributors::default()).is_err());
         assert!(rust_files(directory.path()).is_err());
         assert!(rust_files_with_git(directory.path(), "missing-git-for-test").is_err());
         assert!(collect_with_git(directory.path(), None, "missing-git-for-test").is_err());
@@ -332,7 +367,7 @@ mod tests {
         );
         fs::create_dir(repository.root().join(".git-blame-ignore-revs")).unwrap();
 
-        assert!(super::repository(repository.root()).is_err());
+        assert!(super::repository(repository.root(), &Contributors::default()).is_err());
     }
 
     #[test]
@@ -348,9 +383,66 @@ mod tests {
         );
         let ignored = HashSet::from(["ignored".to_owned()]);
 
-        let copyrights = parse_git_log(output.as_bytes(), &ignored);
+        let copyrights = parse_git_log(output.as_bytes(), &ignored).into_copyrights();
 
         assert_eq!(copyrights.len(), 1);
         assert_eq!(copyrights[0].statement(), "Copyright, 2022, by Dana.");
+    }
+
+    #[test]
+    fn merges_recorded_contributions_with_a_files_history() {
+        let repository = GitRepository::new();
+        repository.write("src/heap.rs", "pub fn heap() {}\n");
+        commit(
+            &repository,
+            "Samuel",
+            "samuel@example.com",
+            "2026-01-02T03:04:05+00:00",
+        );
+        repository.write("src/other.rs", "pub fn other() {}\n");
+        commit(
+            &repository,
+            "Carol",
+            "carol@example.com",
+            "2026-02-03T04:05:06+00:00",
+        );
+        repository.write(
+            ".contributors.toml",
+            concat!(
+                "[[contribution]]\npath = \"src/heap.rs\"\ntime = 2021-02-12T12:19:44+01:00\n",
+                "author = { name = \"Wander\", email = \"wander@example.com\" }\n\n",
+                "[[contribution]]\npath = \"src/heap.rs\"\ntime = 2021-08-01\n",
+                "author = { name = \"Samuel\", email = \"samuel@example.com\" }\n\n",
+                "[[contribution]]\ntime = 2018-05-06\nauthor = { name = \"Dana\" }\n",
+            ),
+        );
+        let contributors = Contributors::load(repository.root()).unwrap();
+
+        let statements = |copyrights: Vec<Copyright>| {
+            copyrights
+                .iter()
+                .map(Copyright::statement)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            statements(file(repository.root(), Path::new("src/heap.rs"), &contributors).unwrap()),
+            [
+                "Copyright, 2021, by Wander.",
+                "Copyright, 2021-2026, by Samuel."
+            ]
+        );
+        assert_eq!(
+            statements(file(repository.root(), Path::new("src/other.rs"), &contributors).unwrap()),
+            ["Copyright, 2026, by Carol."]
+        );
+        assert_eq!(
+            statements(super::repository(repository.root(), &contributors).unwrap()),
+            [
+                "Copyright, 2018, by Dana.",
+                "Copyright, 2021, by Wander.",
+                "Copyright, 2021-2026, by Samuel.",
+                "Copyright, 2026, by Carol.",
+            ]
+        );
     }
 }
