@@ -291,15 +291,16 @@ fn run_git(root: &Path, executable: &str, arguments: &[&str], input: &str) -> Re
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| Error::new(format!("git {}: {error}", arguments[0])))?;
-    // Write all input before collecting output: both commands read their whole input first. A child that exits without reading it reports the failure through its status and stderr below, which say more than the broken pipe would.
-    let _ = child
-        .stdin
-        .take()
-        .expect("stdin is piped")
-        .write_all(input.as_bytes());
+    // Write input from another thread while collecting output: `check-mailmap --stdin` answers each line as it reads it, so writing everything first could fill both pipes and deadlock. A child that exits without reading its input reports the failure through its status and stderr below, which say more than the broken pipe would.
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    let input = input.to_owned();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(input.as_bytes());
+    });
     let output = child
         .wait_with_output()
         .expect("waiting for a spawned git process");
+    let _ = writer.join();
     if !output.status.success() {
         return Err(Error::new(format!(
             "git {} failed: {}",
@@ -605,6 +606,25 @@ author = { name = "builder[bot]", email = "bot@example.com" }
         assert!(
             error.contains("returned 0 line(s) for 1 contact(s)"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn maps_thousands_of_contacts_without_deadlocking_on_the_pipes() {
+        let repository = GitRepository::new();
+        let contents: String = (0..5000)
+            .map(|index| {
+                format!(
+                    "[[contribution]]\ntime = 2020-01-01\nauthor = {{ name = \"Author {index}\", email = \"author{index}@example.com\" }}\n"
+                )
+            })
+            .collect();
+        repository.write(FILE_NAME, contents);
+        let contributors = Contributors::load(repository.root()).unwrap();
+        assert_eq!(contributors.repository().count(), 5000);
+        assert_eq!(
+            contributors.repository().last().unwrap().author(),
+            "Author 4999"
         );
     }
 }
