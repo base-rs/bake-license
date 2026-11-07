@@ -1,5 +1,9 @@
 # Releases
 
+## Unreleased
+
+- Keep the blank line between leading documentation, such as module `//!` comments, and the code that follows when updating license headers, instead of removing it on every update.
+
 ## v0.2.6
 
 - Leave generated Rust sources, whose leading comments say `@generated` or "do not edit", without license headers. Previously the update stamped a header onto Bake's generated task registry, which the next `cargo bake --regenerate` removed again.
