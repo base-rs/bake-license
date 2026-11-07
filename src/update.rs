@@ -34,6 +34,7 @@ SOFTWARE."#;
 
 use crate::UpdateSummary;
 
+/// Refresh `license.md`, remove the README's License section, and rewrite tracked Rust source headers from the authorship of `root`: its Git history and the contributions recorded in `.contributors.toml`.
 pub fn update(root: &Path) -> Result<UpdateSummary> {
     update_with(root, &mut FileOperations)
 }

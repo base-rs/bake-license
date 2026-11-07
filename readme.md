@@ -35,7 +35,7 @@ time = 2021-02-12T12:19:44+01:00
 author = { name = "Wander Hillen", email = "wjw.hillen@gmail.com" }
 ```
 
-Each contribution counts like a commit by its author in that year. One naming a `path`, relative to the repository root, adds to that file's header, matched against its current path; one without a `path` adds only to `license.md`, which counts every contribution. `time` is a TOML date or date-time. Authors with an `email` are mapped through `.mailmap`, and bot authors are skipped, as for commits. The format follows the Ruby `bake-modernize` task's `.contributors.yaml`.
+Each contribution counts like a commit by its author in that year. One naming a `path` adds to that file's header; the path is relative to the repository root and must name a tracked file, so update it when the file is renamed. One without a `path` adds only to `license.md`, which counts every contribution. `time` is a TOML date or date-time. Names and emails are trimmed and may not contain control characters. Authors with an `email` are mapped through `.mailmap`, and bot authors are skipped, as for commits. Malformed entries and untracked paths fail the update, naming the contribution. The format follows the Ruby `bake-modernize` task's `.contributors.yaml`.
 
 ## Releasing
 

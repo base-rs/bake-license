@@ -48,6 +48,8 @@ fn registered_task_updates_the_project_root() {
             "user.name=Fixture Author",
             "-c",
             "user.email=fixture@example.com",
+            "-c",
+            "commit.gpgsign=false",
             "commit",
             "--quiet",
             "-m",

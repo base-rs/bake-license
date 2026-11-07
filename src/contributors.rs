@@ -4,9 +4,10 @@
 //! Contributions recorded outside the repository's Git history, from `.contributors.toml`.
 
 use bake::{Error, Result};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::io::Write;
 use std::path::{Component, Path};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use toml_edit::{DocumentMut, Item, Table, Value};
 
 const FILE_NAME: &str = ".contributors.toml";
@@ -56,6 +57,7 @@ impl Contributors {
         };
         let entries =
             parse(&contents).map_err(|error| Error::new(format!("{FILE_NAME}: {error}")))?;
+        check_paths(root, executable, &entries)?;
         let names = mailmap_names(root, executable, &entries)?;
         Ok(Self(
             entries
@@ -109,10 +111,21 @@ fn parse(contents: &str) -> std::result::Result<Vec<Entry>, String> {
     let Some(item) = table.get("contribution") else {
         return Ok(Vec::new());
     };
-    let Some(contributions) = item.as_array_of_tables() else {
-        return Err(
-            "`contribution` must be an array of tables, written `[[contribution]]`".to_owned(),
-        );
+    // `[[contribution]]` tables, or the equivalent inline array of inline tables.
+    let contributions: Vec<Table> = match item {
+        Item::ArrayOfTables(tables) => tables.iter().cloned().collect(),
+        Item::Value(Value::Array(array)) => array
+            .iter()
+            .map(|value| match value {
+                Value::InlineTable(table) => Ok(table.clone().into_table()),
+                _ => Err("`contribution` entries must be tables".to_owned()),
+            })
+            .collect::<std::result::Result<_, _>>()?,
+        _ => {
+            return Err(
+                "`contribution` must be an array of tables, written `[[contribution]]`".to_owned(),
+            );
+        }
     };
     contributions
         .iter()
@@ -166,12 +179,14 @@ fn entry(table: &Table) -> std::result::Result<Entry, String> {
             .map(|(_, value)| *value)
     };
     let name = match field("name") {
-        Some(Some(Value::String(name))) if !name.value().trim().is_empty() => name.value().clone(),
+        Some(Some(Value::String(name))) if !name.value().trim().is_empty() => {
+            text(name.value(), "author.name")?
+        }
         Some(_) => return Err("`author.name` must be a nonempty string".to_owned()),
         None => return Err("missing `author.name`".to_owned()),
     };
     let email = match field("email") {
-        Some(Some(Value::String(email))) => Some(email.value().clone()),
+        Some(Some(Value::String(email))) => Some(text(email.value(), "author.email")?),
         Some(_) => return Err("`author.email` must be a string".to_owned()),
         None => None,
     };
@@ -181,6 +196,14 @@ fn entry(table: &Table) -> std::result::Result<Entry, String> {
         email,
         year,
     })
+}
+
+// Names and emails end up in single-line comments and in `git check-mailmap`'s line-based output, so they may not contain control characters such as newlines. Surrounding whitespace is trimmed, as the mailmap does.
+fn text(value: &str, key: &str) -> std::result::Result<String, String> {
+    if value.chars().any(char::is_control) {
+        return Err(format!("`{key}` must not contain control characters"));
+    }
+    Ok(value.trim().to_owned())
 }
 
 fn optional_string(item: Option<&Item>, key: &str) -> std::result::Result<Option<String>, String> {
@@ -202,21 +225,22 @@ fn mailmap_names(root: &Path, executable: &str, entries: &[Entry]) -> Result<Vec
                 .map(|email| contact(&entry.name, email))
         })
         .collect();
-    let mut mapped = std::collections::BTreeMap::new();
+    let mut mapped = BTreeMap::new();
     if !contacts.is_empty() {
-        let output = Command::new(executable)
-            .current_dir(root)
-            .arg("check-mailmap")
-            .args(&contacts)
-            .output()?;
-        if !output.status.success() {
+        let input: String = contacts
+            .iter()
+            .map(|contact| format!("{contact}\n"))
+            .collect();
+        let output = run_git(root, executable, &["check-mailmap", "--stdin"], &input)?;
+        let lines: Vec<&str> = output.lines().collect();
+        if lines.len() != contacts.len() {
             return Err(Error::new(format!(
-                "git check-mailmap failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                "git check-mailmap returned {} line(s) for {} contact(s)",
+                lines.len(),
+                contacts.len()
             )));
         }
-        let output = String::from_utf8_lossy(&output.stdout);
-        for (contact, line) in contacts.iter().zip(output.lines()) {
+        for (contact, line) in contacts.iter().zip(lines) {
             let name = line.rsplit_once(" <").map_or(line, |(name, _)| name);
             mapped.insert(contact.clone(), name.to_owned());
         }
@@ -232,6 +256,58 @@ fn mailmap_names(root: &Path, executable: &str, entries: &[Entry]) -> Result<Vec
                 .unwrap_or_else(|| entry.name.clone())
         })
         .collect())
+}
+
+// A path must name a tracked file, so that a mistyped path, or one left behind by a rename, fails instead of silently attributing nothing.
+fn check_paths(root: &Path, executable: &str, entries: &[Entry]) -> Result<()> {
+    if entries.iter().all(|entry| entry.path.is_none()) {
+        return Ok(());
+    }
+    let output = run_git(root, executable, &["ls-files", "--cached", "-z"], "")?;
+    let tracked: HashSet<Vec<Component<'_>>> = output
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(|path| normalized(Path::new(path)))
+        .collect();
+    for (index, entry) in entries.iter().enumerate() {
+        if let Some(path) = &entry.path
+            && !tracked.contains(&normalized(Path::new(path)))
+        {
+            return Err(Error::new(format!(
+                "{FILE_NAME}: contribution {}: `path` {path:?} is not a tracked file; paths are relative to the repository root and must follow renames",
+                index + 1
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn run_git(root: &Path, executable: &str, arguments: &[&str], input: &str) -> Result<String> {
+    let mut child = Command::new(executable)
+        .current_dir(root)
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| Error::new(format!("git {}: {error}", arguments[0])))?;
+    // Write all input before collecting output: both commands read their whole input first. A child that exits without reading it reports the failure through its status and stderr below, which say more than the broken pipe would.
+    let _ = child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(input.as_bytes());
+    let output = child
+        .wait_with_output()
+        .expect("waiting for a spawned git process");
+    if !output.status.success() {
+        return Err(Error::new(format!(
+            "git {} failed: {}",
+            arguments[0],
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn contact(name: &str, email: &str) -> String {
@@ -261,6 +337,13 @@ mod tests {
     #[test]
     fn loads_contributions_with_paths_dates_and_mailmapped_authors_and_skips_bots() {
         let repository = GitRepository::new();
+        repository.write("src/heap.rs", "pub fn heap() {}\n");
+        repository.commit(
+            "Alice",
+            "alice@example.com",
+            "2026-01-02T03:04:05+00:00",
+            "Add heap",
+        );
         repository.write(
             ".mailmap",
             "Alice <alice@example.com> <alice-old@example.com>\n",
@@ -422,6 +505,106 @@ author = { name = "builder[bot]", email = "bot@example.com" }
                 .unwrap_err()
                 .to_string()
                 .starts_with(FILE_NAME)
+        );
+    }
+
+    #[test]
+    fn rejects_paths_that_are_not_tracked_files() {
+        let repository = GitRepository::new();
+        repository.write("src/lib.rs", "pub fn lib() {}\n");
+        repository.commit(
+            "Alice",
+            "alice@example.com",
+            "2026-01-02T03:04:05+00:00",
+            "Add source",
+        );
+        for path in ["src/old.rs", "SRC/lib.rs", "src", "/src/lib.rs"] {
+            repository.write(
+                FILE_NAME,
+                format!(
+                    "[[contribution]]\npath = {path:?}\ntime = 2020-01-01\nauthor = {{ name = \"A\" }}\n"
+                ),
+            );
+            let error = Contributors::load(repository.root())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("contribution 1: `path`") && error.contains("not a tracked file"),
+                "{path}: {error}"
+            );
+        }
+        // Outside a repository the tracked files cannot be listed.
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join(FILE_NAME),
+            "[[contribution]]\npath = \"src/lib.rs\"\ntime = 2020-01-01\nauthor = { name = \"A\" }\n",
+        )
+        .unwrap();
+        assert!(
+            Contributors::load(directory.path())
+                .unwrap_err()
+                .to_string()
+                .contains("git ls-files failed")
+        );
+    }
+
+    #[test]
+    fn accepts_an_inline_array_of_contributions_and_trims_authors() {
+        let entries = parse(
+            "contribution = [{ time = 2020-01-01, author = { name = \" Sam \", email = \" sam@example.com \" } }]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            entries,
+            [Entry {
+                path: None,
+                name: "Sam".to_owned(),
+                email: Some("sam@example.com".to_owned()),
+                year: 2020,
+            }]
+        );
+        assert!(
+            parse("contribution = [1]\n")
+                .unwrap_err()
+                .contains("entries must be tables")
+        );
+    }
+
+    #[test]
+    fn rejects_control_characters_in_authors() {
+        for author in [
+            "{ name = \"A\\nfn injected() {}\" }",
+            "{ name = \"A\", email = \"a@example.com\\nB <b@example.com>\" }",
+        ] {
+            let error = parse(&format!(
+                "[[contribution]]\ntime = 2020-01-01\nauthor = {author}\n"
+            ))
+            .unwrap_err();
+            assert!(
+                error.contains("must not contain control characters"),
+                "{author}: {error}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_mailmap_output_that_does_not_match_its_contacts() {
+        use std::os::unix::fs::PermissionsExt;
+        let repository = GitRepository::new();
+        repository.write(
+            FILE_NAME,
+            "[[contribution]]\ntime = 2020-01-01\nauthor = { name = \"A\", email = \"a@example.com\" }\n",
+        );
+        // A stand-in for Git that answers check-mailmap with no lines.
+        let fake = repository.write("fake-git", "#!/bin/sh\ncat > /dev/null\n");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = Contributors::load_with_git(repository.root(), fake.to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("returned 0 line(s) for 1 contact(s)"),
+            "{error}"
         );
     }
 }
