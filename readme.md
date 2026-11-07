@@ -24,6 +24,19 @@ cargo bake license:update
 
 The task updates `license.md` and tracked Rust source headers, honoring `.mailmap` and `.git-blame-ignore-revs`. It skips bot accounts ending in `[bot]`. Existing Rust documentation comments are retained. Commit new files before running the task if they should receive copyright headers.
 
+### Contributions outside the Git history
+
+Existing copyright lines are replaced with lines derived from authorship, so work that predates the repository, such as code ported from another project, needs recording. List it in `.contributors.toml` at the repository root, one `[[contribution]]` per contribution:
+
+```toml
+[[contribution]]
+path = "src/timers.rs"
+time = 2021-02-12T12:19:44+01:00
+author = { name = "Wander Hillen", email = "wjw.hillen@gmail.com" }
+```
+
+Each contribution counts like a commit by its author in that year. One naming a `path`, relative to the repository root, adds to that file's header, matched against its current path; one without a `path` adds only to `license.md`, which counts every contribution. `time` is a TOML date or date-time. Authors with an `email` are mapped through `.mailmap`, and bot authors are skipped, as for commits. The format follows the Ruby `bake-modernize` task's `.contributors.yaml`.
+
 ## Releasing
 
 Prepare a release with `cargo bake cargo:version:patch` (or `minor`, `major`, or `bump --version X.Y.Z`), commit with a `Release: vVERSION` trailer, then run `cargo bake cargo:release` and open a pull request. After review and merge, GitHub Actions publishes the release when the configured `crates-io` environment approves it. Follow the shared [Releasing skill](https://github.com/base-rs/base-project/blob/main/context/releasing.md) for the standard process.

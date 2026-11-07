@@ -25,6 +25,7 @@ name = "bake_license"
 base-markdown = "0.1.0"
 bake = "0"
 tempfile = "3.27"
+toml_edit = "0.25"
 
 [patch.crates-io]
 bake-license = { path = "." }

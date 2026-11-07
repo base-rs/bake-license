@@ -51,7 +51,17 @@ impl GitRepository {
         let output = Command::new("git")
             .current_dir(self.root())
             .args([
-                "-c", &author, "-c", &email, "commit", "--quiet", "-m", message,
+                "-c",
+                &author,
+                "-c",
+                &email,
+                // Fixture commits must not depend on the user's signing configuration.
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                message,
             ])
             .env("GIT_AUTHOR_DATE", date)
             .env("GIT_COMMITTER_DATE", date)

@@ -2,6 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use crate::authorship::{self, Copyright};
+use crate::contributors::Contributors;
 use crate::source;
 use bake::{Error, Result};
 use base_markdown::{
@@ -38,16 +39,25 @@ pub fn update(root: &Path) -> Result<UpdateSummary> {
 }
 
 trait UpdateOperations {
-    fn repository(&mut self, root: &Path) -> Result<Vec<Copyright>> {
-        authorship::repository(root)
+    fn contributors(&mut self, root: &Path) -> Result<Contributors> {
+        Contributors::load(root)
+    }
+
+    fn repository(&mut self, root: &Path, contributors: &Contributors) -> Result<Vec<Copyright>> {
+        authorship::repository(root, contributors)
     }
 
     fn rust_files(&mut self, root: &Path) -> Result<Vec<String>> {
         authorship::rust_files(root)
     }
 
-    fn file(&mut self, root: &Path, path: &Path) -> Result<Vec<Copyright>> {
-        authorship::file(root, path)
+    fn file(
+        &mut self,
+        root: &Path,
+        path: &Path,
+        contributors: &Contributors,
+    ) -> Result<Vec<Copyright>> {
+        authorship::file(root, path, contributors)
     }
 
     fn read_file(&mut self, path: &Path) -> Result<String> {
@@ -64,7 +74,9 @@ struct FileOperations;
 impl UpdateOperations for FileOperations {}
 
 fn update_with(root: &Path, operations: &mut impl UpdateOperations) -> Result<UpdateSummary> {
-    let repository_copyrights = operations.repository(root)?;
+    // Load recorded contributions once; every file's lookup filters them.
+    let contributors = operations.contributors(root)?;
+    let repository_copyrights = operations.repository(root, &contributors)?;
     let mut summary = UpdateSummary::default();
 
     let license_path = root.join("license.md");
@@ -88,7 +100,7 @@ fn update_with(root: &Path, operations: &mut impl UpdateOperations) -> Result<Up
             continue;
         }
 
-        let copyrights = operations.file(root, Path::new(&relative_path))?;
+        let copyrights = operations.file(root, Path::new(&relative_path), &contributors)?;
         if copyrights.is_empty() {
             continue;
         }
@@ -245,7 +257,16 @@ mod tests {
     }
 
     impl UpdateOperations for FailingOperations {
-        fn repository(&mut self, _root: &Path) -> Result<Vec<Copyright>> {
+        fn contributors(&mut self, _root: &Path) -> Result<Contributors> {
+            self.error("contributors")?;
+            Ok(Contributors::default())
+        }
+
+        fn repository(
+            &mut self,
+            _root: &Path,
+            _contributors: &Contributors,
+        ) -> Result<Vec<Copyright>> {
             self.error("repository")?;
             Ok(Vec::new())
         }
@@ -259,7 +280,12 @@ mod tests {
             }
         }
 
-        fn file(&mut self, _root: &Path, _path: &Path) -> Result<Vec<Copyright>> {
+        fn file(
+            &mut self,
+            _root: &Path,
+            _path: &Path,
+            _contributors: &Contributors,
+        ) -> Result<Vec<Copyright>> {
             self.error("file")?;
             Ok(vec![Copyright::new(2024, 2024, "Alice")])
         }
@@ -480,6 +506,7 @@ mod tests {
     #[test]
     fn propagates_errors_from_each_project_update_stage() {
         for failure in [
+            "contributors",
             "repository",
             "replace-license",
             "replace-readme",

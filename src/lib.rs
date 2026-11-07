@@ -3,6 +3,7 @@
 
 //! License and copyright maintenance tasks for Bake.
 mod authorship;
+mod contributors;
 mod source;
 mod update;
 mod update_summary;
