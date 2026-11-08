@@ -22,7 +22,17 @@ Run the updater:
 cargo bake license:update
 ```
 
-The task updates `license.md` and tracked Rust source headers, honoring `.mailmap` and `.git-blame-ignore-revs`. It skips bot accounts ending in `[bot]`. Existing Rust documentation comments are retained. Commit new files before running the task if they should receive copyright headers.
+The task updates `license.md` and tracked Rust source headers, honoring `.mailmap` and `.git-blame-ignore-revs`. It skips bot accounts ending in `[bot]`. Existing Rust documentation comments are retained. Commit new files before running the task if they should receive copyright headers. Every tracked Rust file receives a header, including test fixtures such as trybuild compile-fail cases under `tests/ui/`; regenerate their compiler-output snapshots, for trybuild with `TRYBUILD=overwrite cargo test`, after a header changes their line numbers.
+
+Check that nothing needs updating, without writing any file:
+
+```sh
+cargo bake license:check
+```
+
+The check fails when `license:update` would change `license.md`, the README, or any Rust source header, naming each file and the command that fixes it. Run it in pull request CI, so a missing or stale header is fixed in the pull request that introduces it rather than by a later release. Copyright lines come from the Git history, so the check refuses a shallow clone; in GitHub Actions, check out the commits under review with `fetch-depth: 0`. The shared [Testing guide](https://github.com/base-rs/bake-test/blob/main/context/testing.md) gives the standard workflow job.
+
+`license.md` is written with one line per paragraph and backslash line breaks between copyright lines, the form that Markdown normalization produces, so normalizing it afterwards does not make the check fail.
 
 ### Contributions outside the Git history
 

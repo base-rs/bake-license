@@ -53,6 +53,19 @@ pub(crate) fn file(
     collect(root, Some(path), contributors.file(path))
 }
 
+/// Whether `root` is a shallow clone, whose history, and so its authorship, is incomplete.
+pub(crate) fn is_shallow(root: &Path) -> Result<bool> {
+    is_shallow_with_git(root, "git")
+}
+
+fn is_shallow_with_git(root: &Path, executable: &str) -> Result<bool> {
+    let output = git_command(root, executable)
+        .args(["rev-parse", "--is-shallow-repository"])
+        .output()?;
+    ensure_success(&output.status, &output.stderr, "git rev-parse")?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
+}
+
 pub(crate) fn rust_files(root: &Path) -> Result<Vec<String>> {
     rust_files_with_git(root, "git")
 }
@@ -335,6 +348,41 @@ mod tests {
             rust_files(repository.root()).unwrap(),
             ["src/lib.rs", "tests/integration.rs"]
         );
+    }
+
+    #[test]
+    fn detects_shallow_clones() {
+        let repository = GitRepository::new();
+        repository.write("src/lib.rs", "pub fn first() {}\n");
+        commit(
+            &repository,
+            "Alice",
+            "alice@example.com",
+            "2020-01-02T03:04:05+00:00",
+        );
+        repository.write("src/lib.rs", "pub fn second() {}\n");
+        commit(
+            &repository,
+            "Bob",
+            "bob@example.com",
+            "2021-01-02T03:04:05+00:00",
+        );
+        assert!(!is_shallow(repository.root()).unwrap());
+
+        let directory = tempfile::tempdir().unwrap();
+        let clone = directory.path().join("clone");
+        let source = format!("file://{}", repository.root().display());
+        assert_success(
+            &std::process::Command::new("git")
+                .args(["clone", "--quiet", "--depth", "1", &source])
+                .arg(&clone)
+                .output()
+                .unwrap(),
+        );
+        assert!(is_shallow(&clone).unwrap());
+
+        assert!(is_shallow(directory.path()).is_err());
+        assert!(is_shallow_with_git(repository.root(), "missing-git-for-test").is_err());
     }
 
     #[test]

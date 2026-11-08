@@ -22,6 +22,7 @@ fn lists_standard_project_tasks() {
         "agent:context:install",
         "cargo:after_version_bump",
         "cargo:release",
+        "license:check",
         "license:update",
         "readme:update",
         "releases:update",
