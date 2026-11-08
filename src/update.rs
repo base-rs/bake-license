@@ -6,12 +6,12 @@ use crate::contributors::Contributors;
 use crate::source;
 use bake::{Error, Result};
 use base_markdown::{
-    Document, ParseOptions,
+    Document, ParseOptions, normalize_markdown,
     stream::{EventKind, Tag},
 };
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
 const MIT_LICENSE: &str = r#"Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -37,6 +37,24 @@ use crate::UpdateSummary;
 /// Refresh `license.md`, remove the README's License section, and rewrite tracked Rust source headers from the authorship of `root`: its Git history and the contributions recorded in `.contributors.toml`.
 pub fn update(root: &Path) -> Result<UpdateSummary> {
     update_with(root, &mut FileOperations)
+}
+
+/// List the files, relative to `root`, that [`update`] would change, without writing any.
+///
+/// Authorship comes from the Git history, so a shallow clone is refused rather than checked against partial history.
+pub fn check(root: &Path) -> Result<Vec<PathBuf>> {
+    if authorship::is_shallow(root)? {
+        return Err(Error::new(
+            "the license check needs the full Git history, but this is a shallow clone; fetch it with `git fetch --unshallow`, or check out with `fetch-depth: 0` in GitHub Actions",
+        ));
+    }
+    let mut operations = CheckOperations::default();
+    update_with(root, &mut operations)?;
+    Ok(operations
+        .changed
+        .into_iter()
+        .map(|path| path.strip_prefix(root).map(Path::to_owned).unwrap_or(path))
+        .collect())
 }
 
 trait UpdateOperations {
@@ -73,6 +91,26 @@ trait UpdateOperations {
 struct FileOperations;
 
 impl UpdateOperations for FileOperations {}
+
+/// Records the files an update would change instead of writing them.
+#[derive(Default)]
+struct CheckOperations {
+    changed: Vec<PathBuf>,
+}
+
+impl UpdateOperations for CheckOperations {
+    fn replace_if_changed(&mut self, path: &Path, contents: &str) -> Result<bool> {
+        let changed = match fs::read_to_string(path) {
+            Ok(existing) => existing != contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => return Err(Error::new(format!("{}: {error}", path.display()))),
+        };
+        if changed {
+            self.changed.push(path.to_owned());
+        }
+        Ok(changed)
+    }
+}
 
 fn update_with(root: &Path, operations: &mut impl UpdateOperations) -> Result<UpdateSummary> {
     // Load recorded contributions once; every file's lookup filters them.
@@ -122,6 +160,7 @@ fn update_with(root: &Path, operations: &mut impl UpdateOperations) -> Result<Up
     Ok(summary)
 }
 
+/// Render `license.md` as `base_markdown::normalize_markdown` writes it, the normalization the Base project release hook applies afterwards, so normalizing leaves the file unchanged and [`check`] agrees with the released file.
 fn license_document(copyrights: &[Copyright]) -> String {
     let mut output = String::from("# MIT License\n\n");
     for copyright in copyrights {
@@ -133,7 +172,7 @@ fn license_document(copyrights: &[Copyright]) -> String {
     }
     output.push_str(MIT_LICENSE);
     output.push('\n');
-    output
+    normalize_markdown(&output).expect("the license document is valid Markdown")
 }
 
 fn remove_license_section(source: &str) -> String {
@@ -361,9 +400,33 @@ mod tests {
             Copyright::new(2021, 2024, "Bob."),
         ]);
         assert!(with_authors.starts_with(
-            "# MIT License\n\nCopyright, 2020, by Alice.  \nCopyright, 2021-2024, by Bob.  \n\nPermission is hereby granted"
+            "# MIT License\n\nCopyright, 2020, by Alice.\\\nCopyright, 2021-2024, by Bob.\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software"
         ));
-        assert!(with_authors.ends_with("SOFTWARE.\n"));
+        assert!(
+            with_authors
+                .contains("subject to the following conditions:\n\nThe above copyright notice")
+        );
+        assert!(with_authors.ends_with("DEALINGS IN THE SOFTWARE.\n"));
+        assert_eq!(with_authors.lines().count(), 10);
+
+        let single = license_document(&[Copyright::new(2026, 2026, "Alice")]);
+        assert!(single.starts_with("# MIT License\n\nCopyright, 2026, by Alice.\n\nPermission"));
+    }
+
+    #[test]
+    fn renders_license_documents_that_normalization_leaves_unchanged() {
+        for copyrights in [
+            Vec::new(),
+            vec![Copyright::new(2026, 2026, "Alice")],
+            vec![
+                Copyright::new(2021, 2021, "jane_doe"),
+                Copyright::new(2022, 2026, "*Star* & <Co>"),
+                Copyright::new(2026, 2026, "[Bracket](Name)"),
+            ],
+        ] {
+            let document = license_document(&copyrights);
+            assert_eq!(normalize_markdown(&document).unwrap(), document);
+        }
     }
 
     #[test]
@@ -414,6 +477,121 @@ mod tests {
                 files_changed: 0,
             }
         );
+    }
+
+    #[test]
+    fn check_lists_what_update_would_change_without_writing() {
+        let fixture = "fn main() {\n    compile_error!(\"line 2\");\n}\n";
+        let readme = "# Project\n\n## License\n\nMIT terms.\n";
+        let repository = GitRepository::new();
+        repository.write("readme.md", readme);
+        repository.write("src/lib.rs", "pub fn example() {}\n");
+        repository.write("tests/ui/fails.rs", fixture);
+        repository.commit(
+            "Alice",
+            "alice@example.com",
+            "2024-01-02T03:04:05+00:00",
+            "Add project files",
+        );
+
+        assert_eq!(
+            check(repository.root()).unwrap(),
+            [
+                PathBuf::from("license.md"),
+                PathBuf::from("readme.md"),
+                PathBuf::from("src/lib.rs"),
+                PathBuf::from("tests/ui/fails.rs"),
+            ]
+        );
+        assert!(!repository.root().join("license.md").exists());
+        assert_eq!(
+            fs::read_to_string(repository.root().join("readme.md")).unwrap(),
+            readme
+        );
+        assert_eq!(
+            fs::read_to_string(repository.root().join("tests/ui/fails.rs")).unwrap(),
+            fixture
+        );
+
+        update(repository.root()).unwrap();
+        assert!(check(repository.root()).unwrap().is_empty());
+        repository.commit(
+            "Alice",
+            "alice@example.com",
+            "2024-01-03T03:04:05+00:00",
+            "Update license headers",
+        );
+        assert!(check(repository.root()).unwrap().is_empty());
+
+        // A new author's commit makes the file's header stale until the next update.
+        repository.write("tests/ui/fails.rs", "// Changed.\nfn main() {}\n");
+        repository.commit(
+            "Bob",
+            "bob@example.com",
+            "2025-01-02T03:04:05+00:00",
+            "Change the fixture",
+        );
+        assert_eq!(
+            check(repository.root()).unwrap(),
+            [
+                PathBuf::from("license.md"),
+                PathBuf::from("tests/ui/fails.rs")
+            ]
+        );
+    }
+
+    #[test]
+    fn check_refuses_shallow_clones_and_reports_unreadable_files() {
+        let repository = GitRepository::new();
+        repository.write("src/lib.rs", "pub fn first() {}\n");
+        repository.commit(
+            "Alice",
+            "alice@example.com",
+            "2024-01-02T03:04:05+00:00",
+            "Add source",
+        );
+        repository.write("src/lib.rs", "pub fn second() {}\n");
+        repository.commit(
+            "Bob",
+            "bob@example.com",
+            "2025-01-02T03:04:05+00:00",
+            "Change source",
+        );
+
+        let directory = tempdir().unwrap();
+        let clone = directory.path().join("clone");
+        let source = format!("file://{}", repository.root().display());
+        crate::test_support::assert_success(
+            &std::process::Command::new("git")
+                .args(["clone", "--quiet", "--depth", "1", &source])
+                .arg(&clone)
+                .output()
+                .unwrap(),
+        );
+        let error = check(&clone).unwrap_err().to_string();
+        assert!(error.contains("shallow clone"), "{error}");
+        assert!(error.contains("fetch-depth: 0"), "{error}");
+
+        assert!(check(directory.path()).is_err());
+
+        repository.write(".contributors.toml", "not toml");
+        repository.commit(
+            "Alice",
+            "alice@example.com",
+            "2025-01-03T03:04:05+00:00",
+            "Add malformed contributions",
+        );
+        assert!(check(repository.root()).is_err());
+
+        let mut operations = CheckOperations::default();
+        let invalid = directory.path().join("invalid.md");
+        fs::write(&invalid, [0xff]).unwrap();
+        let error = operations
+            .replace_if_changed(&invalid, "content")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid.md"), "{error}");
+        assert!(operations.changed.is_empty());
     }
 
     #[test]
