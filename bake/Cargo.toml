@@ -6,5 +6,5 @@ publish = false
 
 [dependencies]
 bake = ">=0.20, <1"
-bake-cargo = "0.5.0"
-base-project = ">=0.1.0"
+bake-cargo = "0.9.1"
+base-project = ">=0.1.7"
