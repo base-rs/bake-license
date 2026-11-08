@@ -32,7 +32,9 @@ cargo bake license:check
 
 The check fails when `license:update` would change `license.md`, the README, or any Rust source header, naming each file and the command that fixes it. Run it in pull request CI, so a missing or stale header is fixed in the pull request that introduces it rather than by a later release. Copyright lines come from the Git history, so the check refuses a shallow clone; in GitHub Actions, check out the commits under review with `fetch-depth: 0`. The shared [Testing guide](https://github.com/base-rs/bake-test/blob/main/context/testing.md) gives the standard workflow job.
 
-`license.md` is written with one line per paragraph and backslash line breaks between copyright lines, the form that Markdown normalization produces, so normalizing it afterwards does not make the check fail.
+A pull request is checked against its own commits. A squash merge records one author at the merge date, so a pull request with commits by several authors, one merged in a later year, or one that changes a file also changed on the base branch since it branched can leave headers on the base branch that the next update changes. The check on pushes to the base branch reports them; fix them with `license:update` before releasing.
+
+`license.md` is written as `base_markdown::normalize_markdown` writes it, so normalizing it afterwards, as the Base project release hook does, does not make the check fail.
 
 ### Contributions outside the Git history
 

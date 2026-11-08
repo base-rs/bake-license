@@ -6,7 +6,7 @@ use crate::contributors::Contributors;
 use crate::source;
 use bake::{Error, Result};
 use base_markdown::{
-    Document, ParseOptions,
+    Document, ParseOptions, normalize_markdown,
     stream::{EventKind, Tag},
 };
 use std::fs;
@@ -160,25 +160,19 @@ fn update_with(root: &Path, operations: &mut impl UpdateOperations) -> Result<Up
     Ok(summary)
 }
 
-/// Render `license.md` in normalized Markdown form, with one line per paragraph and backslash line breaks between copyright lines, so that normalizing it, as the Base project release hook does, leaves it unchanged and [`check`] agrees with the released file.
+/// Render `license.md` as `base_markdown::normalize_markdown` writes it, the normalization the Base project release hook applies afterwards, so normalizing leaves the file unchanged and [`check`] agrees with the released file.
 fn license_document(copyrights: &[Copyright]) -> String {
     let mut output = String::from("# MIT License\n\n");
-    for (index, copyright) in copyrights.iter().enumerate() {
+    for copyright in copyrights {
         output.push_str(&copyright.statement());
-        if index + 1 < copyrights.len() {
-            output.push('\\');
-        }
-        output.push('\n');
+        output.push_str("  \n");
     }
     if !copyrights.is_empty() {
         output.push('\n');
     }
-    for paragraph in MIT_LICENSE.split("\n\n") {
-        output.push_str(&paragraph.replace('\n', " "));
-        output.push_str("\n\n");
-    }
-    output.pop();
-    output
+    output.push_str(MIT_LICENSE);
+    output.push('\n');
+    normalize_markdown(&output).expect("the license document is valid Markdown")
 }
 
 fn remove_license_section(source: &str) -> String {
@@ -417,6 +411,22 @@ mod tests {
 
         let single = license_document(&[Copyright::new(2026, 2026, "Alice")]);
         assert!(single.starts_with("# MIT License\n\nCopyright, 2026, by Alice.\n\nPermission"));
+    }
+
+    #[test]
+    fn renders_license_documents_that_normalization_leaves_unchanged() {
+        for copyrights in [
+            Vec::new(),
+            vec![Copyright::new(2026, 2026, "Alice")],
+            vec![
+                Copyright::new(2021, 2021, "jane_doe"),
+                Copyright::new(2022, 2026, "*Star* & <Co>"),
+                Copyright::new(2026, 2026, "[Bracket](Name)"),
+            ],
+        ] {
+            let document = license_document(&copyrights);
+            assert_eq!(normalize_markdown(&document).unwrap(), document);
+        }
     }
 
     #[test]

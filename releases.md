@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Add `license:check`, which fails, naming each file and the fix, when `license:update` would change `license.md`, the README License section, or a Rust source header, without writing anything, so pull request CI can catch a missing or stale header before a release adds it. It refuses shallow clones, whose history gives incomplete copyright lines. The library exposes it as `check`.
-- Write `license.md` in normalized Markdown form, one line per paragraph with backslash line breaks between copyright lines, so that normalizing it after an update, as the Base project release hook does, leaves it unchanged.
+- Write `license.md` as `base_markdown::normalize_markdown` writes it, one line per paragraph with backslash line breaks between copyright lines, so that normalizing it after an update, as the Base project release hook does, leaves it unchanged. Require base-markdown 0.1.3, which provides it.
 
 ## v0.2.8
 
