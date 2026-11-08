@@ -541,6 +541,56 @@ mod tests {
     }
 
     #[test]
+    fn check_agrees_with_update_for_headers_after_inner_attributes() {
+        // As in base-markdown's `src/contract.rs`, whose release added a blank line that `cargo fmt --check` rejected.
+        let attribute_first = "#![doc = include_str!(\"../readme.md\")]\n\n// Released under the MIT License.\n// Copyright, 2024, by Alice.\n";
+        let header_first = "// Released under the MIT License.\n// Copyright, 2024, by Alice.\n\n#![doc = include_str!(\"../readme.md\")]\n";
+        let repository = GitRepository::new();
+        repository.write("src/contract.rs", attribute_first);
+        repository.write("src/lib.rs", header_first);
+        repository.commit(
+            "Alice",
+            "alice@example.com",
+            "2024-01-02T03:04:05+00:00",
+            "Add sources",
+        );
+        update(repository.root()).unwrap();
+        repository.commit(
+            "Alice",
+            "alice@example.com",
+            "2024-01-03T03:04:05+00:00",
+            "Write the license",
+        );
+        repository.write("src/contract.rs", attribute_first);
+        repository.commit(
+            "Alice",
+            "alice@example.com",
+            "2024-01-04T03:04:05+00:00",
+            "Restore the attribute first",
+        );
+
+        assert_eq!(
+            check(repository.root()).unwrap(),
+            [PathBuf::from("src/contract.rs")]
+        );
+        assert_eq!(
+            update(repository.root()).unwrap(),
+            UpdateSummary {
+                source_files: 2,
+                files_changed: 1,
+            }
+        );
+        for path in ["src/contract.rs", "src/lib.rs"] {
+            assert_eq!(
+                fs::read_to_string(repository.root().join(path)).unwrap(),
+                header_first,
+                "{path}"
+            );
+        }
+        assert!(check(repository.root()).unwrap().is_empty());
+    }
+
+    #[test]
     fn check_refuses_shallow_clones_and_reports_unreadable_files() {
         let repository = GitRepository::new();
         repository.write("src/lib.rs", "pub fn first() {}\n");

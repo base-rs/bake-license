@@ -1,5 +1,9 @@
 # Releases
 
+## Unreleased
+
+- Write Rust license headers that `cargo fmt` leaves unchanged, so that a release's `license:update` no longer fails `cargo fmt --check`. The header now goes first, after any shebang and before inner attributes and `//!` documentation, since `rustfmt` removes the blank lines around a comment between inner attributes; an existing header after a leading `#![...]` attribute moves to the top on the next update. A file with nothing after its header no longer ends with a blank line, and a source without a final line ending no longer loses the blank line after its header on the next update.
+
 ## v0.2.9
 
 - Add `license:check`, which fails, naming each file and the fix, when `license:update` would change `license.md`, the README License section, or a Rust source header, without writing anything, so pull request CI can catch a missing or stale header before a release adds it. It refuses shallow clones, whose history gives incomplete copyright lines. The library exposes it as `check`.
