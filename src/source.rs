@@ -2,39 +2,52 @@
 // Copyright, 2026, by Samuel Williams.
 
 use crate::authorship::Copyright;
+use std::ops::Range;
 
-/// Write the license header at the top of the source, after any shebang and
-/// before inner attributes and documentation, replacing the license metadata
-/// in its leading comments.
+/// Write the license header at the top of the source, after any byte order mark and shebang and before inner attributes and documentation, replacing the license metadata in its leading comments.
 ///
-/// rustfmt removes the blank lines around a comment that sits between inner
-/// attributes, including `//!` documentation, so a header placed after a
-/// leading `#![...]` attribute is not stable under formatting when more
-/// follow. Placing it first is, and the source after it is kept as it was,
-/// apart from the removed metadata and the blank lines that separated it.
+/// rustfmt removes the blank lines around a comment that sits between inner attributes, including `//!` documentation, so a header placed after a leading `#![...]` attribute is not stable under formatting when more follow. Placing it first is, and the source after it is kept as it was, apart from the removed metadata, the blank lines that separated it, and the blank lines at its end, which rustfmt removes.
 pub(crate) fn update_source(contents: &str, copyrights: &[Copyright]) -> String {
+    let (byte_order_mark, contents) = split_byte_order_mark(contents);
     let lines: Vec<&str> = contents.split_inclusive('\n').collect();
     let newline = line_ending(contents);
-    let shebang_length = shebang_length(&lines);
-    let leading_length = leading_length(&lines, shebang_length);
+    let shebang_length = shebang_length(contents);
+    let leading = leading_parts(&lines, shebang_length);
 
     let mut remainder: Vec<&str> = Vec::new();
-    let mut index = shebang_length;
-    while index < lines.len() {
-        let line = lines[index];
-        if index < leading_length && is_comment(line) && is_license_metadata(clean_line(line)) {
-            // Remove the metadata, and the blank lines that separated it from what follows when it was separated from what precedes it too, so a blank line between kept comments and code remains.
-            index += 1;
-            if remainder.last().is_none_or(|line| is_blank(line)) {
-                while index < leading_length && is_blank(lines[index]) {
-                    index += 1;
-                }
+    // As 0.2.9 and earlier, remove license metadata in documentation comments only among the leading comments directly after the shebang and the inner attributes that start the source: documentation comments after a block comment, or after an inner attribute that follows comments or blank lines, are the crate's documentation, and are kept.
+    let mut removes_documentation = true;
+    // Whether a blank line or comment has been seen, ending the inner attributes that start the source.
+    let mut after_comment = false;
+    let mut skips_blank_lines = false;
+    for part in &leading {
+        let line = lines[part.start];
+        if !is_blank(line) && !is_comment(line) {
+            // Keep inner attributes and block comments verbatim, including any lines inside them that look like comments.
+            if after_comment || !is_inner_attribute(line) {
+                removes_documentation = false;
             }
+            remainder.extend(&lines[part.clone()]);
+            skips_blank_lines = false;
+            continue;
+        }
+        after_comment = true;
+        if skips_blank_lines && is_blank(line) {
+            continue;
+        }
+        skips_blank_lines = false;
+        if is_license_metadata(clean_line(line))
+            && (removes_documentation || !is_documentation_comment(line))
+        {
+            // Remove the metadata, and the blank lines that separated it from what follows when it was separated from what precedes it too, so a blank line between kept comments and code remains.
+            skips_blank_lines = remainder.last().is_none_or(|line| is_blank(line));
             continue;
         }
         remainder.push(line);
-        index += 1;
     }
+    let body = leading.last().map_or(shebang_length, |part| part.end);
+    remainder.extend(&lines[body..]);
+
     let start = remainder
         .iter()
         .position(|line| !is_blank(line))
@@ -46,7 +59,7 @@ pub(crate) fn update_source(contents: &str, copyrights: &[Copyright]) -> String 
         .map_or(start, |index| index + 1);
     let remainder = &remainder[start..end];
 
-    let mut output = String::new();
+    let mut output = String::from(byte_order_mark);
     for line in &lines[..shebang_length] {
         push_line(&mut output, line, newline);
         output.push_str(newline);
@@ -69,6 +82,14 @@ pub(crate) fn update_source(contents: &str, copyrights: &[Copyright]) -> String 
     output
 }
 
+/// Split off a leading byte order mark, which rustc skips before the shebang, so that it stays first.
+fn split_byte_order_mark(contents: &str) -> (&str, &str) {
+    match contents.strip_prefix('\u{feff}') {
+        Some(rest) => ("\u{feff}", rest),
+        None => ("", contents),
+    }
+}
+
 /// Append a line, ending it with the source's line ending if it has none.
 fn push_line(output: &mut String, line: &str, newline: &str) {
     output.push_str(line);
@@ -77,80 +98,136 @@ fn push_line(output: &mut String, line: &str, newline: &str) {
     }
 }
 
-/// Count the shebang line, which must stay first, if there is one.
-fn shebang_length(lines: &[&str]) -> usize {
+/// Count the shebang line, which must stay first, if there is one: a source starting with `#!` is an inner attribute instead when `[` follows, after optional whitespace.
+fn shebang_length(contents: &str) -> usize {
     usize::from(
-        lines
-            .first()
-            .is_some_and(|line| line.starts_with("#!") && !line.starts_with("#![")),
+        contents
+            .strip_prefix("#!")
+            .is_some_and(|rest| !rest.trim_start().starts_with('[')),
     )
 }
 
-/// Find the end of the leading section after the shebang: the blank lines,
-/// `//` comments and inner attributes before the first item.
-fn leading_length(lines: &[&str], start: usize) -> usize {
+/// Split the leading section after the shebang, before the first item, into its parts: each blank line and `//` comment, and each inner attribute and block comment, which may span several lines.
+fn leading_parts(lines: &[&str], start: usize) -> Vec<Range<usize>> {
+    let mut parts = Vec::new();
     let mut index = start;
     while let Some(line) = lines.get(index) {
-        if is_blank(line) || is_comment(line) {
-            index += 1;
-        } else if clean_line(line).starts_with("#![") {
-            index = attribute_end(lines, index);
+        let end = if is_blank(line) || is_comment(line) {
+            Some(index + 1)
+        } else if is_inner_attribute(line) || line.trim_start().starts_with("/*") {
+            span_end(lines, index)
         } else {
+            None
+        };
+        let Some(end) = end else {
             break;
-        }
+        };
+        parts.push(index..end);
+        index = end;
     }
-    index
+    parts
 }
 
-/// Find the line after the inner attribute starting at `start`, which may span several lines.
-fn attribute_end(lines: &[&str], start: usize) -> usize {
-    let mut index = start;
-    let mut open_brackets = 0isize;
-    let mut in_string = false;
-    let mut escaped = false;
-    while let Some(line) = lines.get(index) {
-        for character in clean_line(line).chars() {
-            if in_string {
-                if escaped {
-                    escaped = false;
-                } else if character == '\\' {
-                    escaped = true;
-                } else if character == '"' {
-                    in_string = false;
+/// The lexical context of a character in [`span_end`].
+enum Context {
+    Code,
+    String,
+    /// A raw string, closed by `"` and this many `#`.
+    RawString(usize),
+    /// Block comments, which nest, at this depth.
+    BlockComment(usize),
+}
+
+/// Find the line after the inner attribute or block comment starting at `start`, which may span several lines, ignoring brackets in strings and comments. Returns `None` when it is unterminated, or code follows it on its last line, so the leading section ends before it.
+fn span_end(lines: &[&str], start: usize) -> Option<usize> {
+    let mut context = Context::Code;
+    let mut open_brackets = 0usize;
+    // Whether code starts the span, so that it is an attribute, which ends at its closing bracket rather than at the end of a comment before it.
+    let mut started = false;
+    let mut closed = false;
+    // The `#` counted since an `r` that may start a raw string.
+    let mut raw_hashes = None;
+    for (index, line) in lines.iter().enumerate().skip(start) {
+        let mut characters = clean_line(line).chars().peekable();
+        while let Some(character) = characters.next() {
+            match context {
+                Context::String => match character {
+                    '\\' => {
+                        characters.next();
+                    }
+                    '"' => context = Context::Code,
+                    _ => {}
+                },
+                Context::RawString(hashes) => {
+                    if character == '"'
+                        && (0..hashes).all(|_| characters.next_if_eq(&'#').is_some())
+                    {
+                        context = Context::Code;
+                    }
                 }
-                continue;
-            }
-
-            match character {
-                '"' => in_string = true,
-                '[' => open_brackets += 1,
-                ']' => open_brackets -= 1,
-                _ => {}
+                Context::BlockComment(depth) => {
+                    if character == '*' && characters.next_if_eq(&'/').is_some() {
+                        context = if depth == 1 {
+                            closed |= !started;
+                            Context::Code
+                        } else {
+                            Context::BlockComment(depth - 1)
+                        };
+                    } else if character == '/' && characters.next_if_eq(&'*').is_some() {
+                        context = Context::BlockComment(depth + 1);
+                    }
+                }
+                Context::Code => {
+                    if character == '/' && characters.next_if_eq(&'/').is_some() {
+                        // The rest of the line is a comment.
+                        break;
+                    }
+                    if character == '/' && characters.next_if_eq(&'*').is_some() {
+                        context = Context::BlockComment(1);
+                        continue;
+                    }
+                    if character.is_whitespace() {
+                        raw_hashes = None;
+                        continue;
+                    }
+                    if closed {
+                        return None;
+                    }
+                    started = true;
+                    let prefix_hashes = raw_hashes.take();
+                    match character {
+                        'r' => raw_hashes = Some(0),
+                        '#' => raw_hashes = prefix_hashes.map(|hashes| hashes + 1),
+                        '"' => {
+                            context = prefix_hashes.map_or(Context::String, Context::RawString);
+                        }
+                        '[' => open_brackets += 1,
+                        ']' => {
+                            open_brackets = open_brackets.saturating_sub(1);
+                            closed = open_brackets == 0;
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
-        index += 1;
-        if open_brackets <= 0 {
-            break;
+        if closed && matches!(context, Context::Code) {
+            return Some(index + 1);
         }
     }
-    index
+    None
 }
 
-/// Whether the leading comments mark the file as generated, so its generator
-/// owns the contents. Only plain `//` comments among the leading comments and
-/// inner attributes after any shebang count, never documentation comments:
-/// either the conventional `@generated` marker, or a comment ending "do not
-/// edit", as Bake's task registry does. Block comments are not recognized.
+/// Whether the leading comments mark the file as generated, so its generator owns the contents. Only plain `//` comments among the leading comments, inner attributes and block comments after any shebang count, never documentation comments or lines inside attributes and block comments: either the conventional `@generated` marker, or a comment ending "do not edit", as Bake's task registry does.
 pub(crate) fn is_generated(contents: &str) -> bool {
+    let (_, contents) = split_byte_order_mark(contents);
     let lines: Vec<&str> = contents.split_inclusive('\n').collect();
-    let start = shebang_length(&lines);
-    lines[start..leading_length(&lines, start)]
-        .iter()
-        .filter(|line| is_comment(line))
-        .map(|line| clean_line(line).trim())
-        .filter(|line| !line.starts_with("///") && !line.starts_with("//!"))
+    leading_parts(&lines, shebang_length(contents))
+        .into_iter()
+        .map(|part| lines[part.start])
+        .filter(|line| is_comment(line) && !is_documentation_comment(line))
         .any(|line| {
-            let line = line.to_ascii_lowercase();
+            let line = clean_line(line).trim().to_ascii_lowercase();
             line.contains("@generated") || line.trim_end_matches('.').ends_with("do not edit")
         })
 }
@@ -161,6 +238,18 @@ fn is_blank(line: &str) -> bool {
 
 fn is_comment(line: &str) -> bool {
     line.trim_start().starts_with("//")
+}
+
+fn is_documentation_comment(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with("///") || line.starts_with("//!")
+}
+
+/// Whether the line starts an inner attribute: `#!` followed by `[`, after optional whitespace.
+fn is_inner_attribute(line: &str) -> bool {
+    line.trim_start()
+        .strip_prefix("#!")
+        .is_some_and(|rest| rest.trim_start().starts_with('['))
 }
 
 fn is_license_metadata(line: &str) -> bool {
@@ -449,5 +538,161 @@ mod tests {
             "// Released under the MIT License.\n// Copyright, 2020-2024, by Alice.\n\n//! Docs.\nuse std::io;\n",
             "no blank line is added where there was none"
         );
+    }
+
+    #[test]
+    fn keeps_the_insides_of_inner_attributes_verbatim() {
+        for rest in [
+            // A string that spans lines, as crate documentation.
+            "#![doc = \"\n// Copyright, 2001, by Someone.\n\"]\n",
+            // A comment inside an attribute, separated by blank lines.
+            "#![cfg_attr(\n    feature = \"doc\",\n\n    // Copyright, 2001, by Someone.\n\n    allow(dead_code)\n)]\n\nfn main() {}\n",
+        ] {
+            assert_updates_to(rest, &format!("{HEADER}\n{rest}"));
+        }
+        assert!(!is_generated(
+            "#![doc = \"\n// @generated by a tool.\n\"]\nfn main() {}\n"
+        ));
+    }
+
+    #[test]
+    fn ignores_brackets_in_strings_and_comments_when_finding_the_end_of_an_inner_attribute() {
+        for (attribute, removed) in [
+            ("#![doc = \"[ \\\" [\"]\n", ""),
+            ("#![doc = r#\"[ \"quoted\" \\\"#]\n", ""),
+            ("#![doc = br\"[\\\"]\n", ""),
+            ("#![allow(dead_code)] // See [the guide.\n", ""),
+            ("#![allow(dead_code)] /* See [ /* nested [ */ */\n", ""),
+            ("#![allow(dead_code)] /* See\n[the guide. */\n", ""),
+            // Not an attribute's end, so the leading section ends before it, and old metadata after it stays.
+            (
+                "#![allow(dead_code)] fn first() {}\n",
+                "// Copyright, 2018, by Previous Author.\n\n",
+            ),
+            (
+                "#![allow(dead_code)\n",
+                "// Copyright, 2018, by Previous Author.\n\n",
+            ),
+        ] {
+            let body = "fn main() {}\n\n// Copyright, 2001, by Someone.\n";
+            assert_updates_to(
+                &format!("{attribute}// Copyright, 2018, by Previous Author.\n\n{body}"),
+                &format!(
+                    "{HEADER}\n{attribute}{removed}{}{body}",
+                    if removed.is_empty() { "\n" } else { "" }
+                ),
+            );
+            assert!(
+                !is_generated(&format!(
+                    "{attribute}fn main() {{}}\n// @generated by a tool.\n"
+                )),
+                "{attribute:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_license_metadata_in_the_code() {
+        let body = "fn main() {\n    // Copyright, 2001, by Someone.\n}\n";
+        assert_updates_to(body, &format!("{HEADER}\n{body}"));
+        assert_updates_to(
+            &format!("#![allow(dead_code)]\n\n{body}"),
+            &format!("{HEADER}\n#![allow(dead_code)]\n\n{body}"),
+        );
+    }
+
+    #[test]
+    fn removes_indented_license_metadata() {
+        assert_updates_to(
+            "    // Copyright, 2018, by Previous Author.\nfn main() {}\n",
+            &format!("{HEADER}\nfn main() {{}}\n"),
+        );
+        assert_updates_to(
+            "  #![allow(dead_code)]\n  // Copyright, 2018, by Previous Author.\nfn main() {}\n",
+            &format!("{HEADER}\n  #![allow(dead_code)]\nfn main() {{}}\n"),
+        );
+    }
+
+    #[test]
+    fn ends_a_source_without_a_final_line_ending_with_its_own_line_ending() {
+        assert_updates_to(
+            "#![allow(dead_code)]\r\n\r\nfn main() {}",
+            &format!(
+                "{}\r\n#![allow(dead_code)]\r\n\r\nfn main() {{}}\r\n",
+                HEADER.replace('\n', "\r\n")
+            ),
+        );
+    }
+
+    #[test]
+    fn keeps_a_byte_order_mark_first() {
+        for (contents, rest) in [
+            (
+                "\u{feff}// Released under the MIT License.\n// Copyright, 2024, by Alice.\n\nfn main() {}\n",
+                "\nfn main() {}\n",
+            ),
+            ("\u{feff}#![allow(dead_code)]\n", "\n#![allow(dead_code)]\n"),
+            ("\u{feff}", ""),
+        ] {
+            assert_updates_to(contents, &format!("\u{feff}{HEADER}{rest}"));
+        }
+        assert_updates_to(
+            "\u{feff}#!/usr/bin/env rustx\nfn main() {}\n",
+            &format!("\u{feff}#!/usr/bin/env rustx\n\n{HEADER}\nfn main() {{}}\n"),
+        );
+        assert!(is_generated(
+            "\u{feff}// @generated by a tool.\nfn main() {}\n"
+        ));
+    }
+
+    #[test]
+    fn removes_old_headers_after_block_comments() {
+        for documentation in [
+            "/*! Crate documentation. */\n",
+            "/*!\n * Crate documentation, with [brackets and /* nested */ comments.\n */\n",
+        ] {
+            assert_updates_to(
+                &format!(
+                    "{documentation}\n// Released under the MIT License.\n// Copyright, 2018, by Previous Author.\n\nfn main() {{}}\n"
+                ),
+                &format!("{HEADER}\n{documentation}\nfn main() {{}}\n"),
+            );
+        }
+        // An unterminated block comment ends the leading section.
+        assert_updates_to(
+            "/* Unterminated.\n// Copyright, 2001, by Someone.\n",
+            &format!("{HEADER}\n/* Unterminated.\n// Copyright, 2001, by Someone.\n"),
+        );
+    }
+
+    #[test]
+    fn recognizes_inner_attributes_with_a_space_after_the_hash_and_bang() {
+        assert_updates_to(
+            "#! [allow(dead_code)]\n\n// Copyright, 2018, by Previous Author.\n\nfn main() {}\n",
+            &format!("{HEADER}\n#! [allow(dead_code)]\n\nfn main() {{}}\n"),
+        );
+        assert!(is_generated(
+            "#! [allow(clippy::all)]\n// @generated by a tool.\nfn main() {}\n"
+        ));
+        assert_eq!(shebang_length("#!\t[allow(dead_code)]\n"), 0);
+        assert_eq!(shebang_length("#!/usr/bin/env rustx\n"), 1);
+    }
+
+    #[test]
+    fn keeps_license_like_documentation_after_later_inner_attributes() {
+        // As 0.2.9 and earlier, documentation comments that look like license metadata are removed only directly after the attributes that start the source.
+        assert_updates_to(
+            "#![allow(dead_code)]\n//! Copyright, 2018, by Previous Author.\n\nfn main() {}\n",
+            &format!("{HEADER}\n#![allow(dead_code)]\n\nfn main() {{}}\n"),
+        );
+        for rest in [
+            "#![allow(dead_code)]\n//! Copyright, 2001, by Someone.\n\nfn main() {}\n",
+            "/*! Crate documentation. */\n#![allow(dead_code)]\n/// Copyright, 2001, by Someone.\nfn main() {}\n",
+        ] {
+            let source = format!("{HEADER}\n{rest}");
+            assert_updates_to(&source, &source);
+        }
+        let rest = "#![allow(dead_code)]\n/* A comment. */\n//! Copyright, 2001, by Someone.\n";
+        assert_updates_to(rest, &format!("{HEADER}\n{rest}"));
     }
 }
