@@ -22,7 +22,7 @@ Run the updater:
 cargo bake license:update
 ```
 
-The task updates `license.md` and tracked Rust source headers, honoring `.mailmap` and `.git-blame-ignore-revs`. It skips bot accounts ending in `[bot]`. Existing Rust documentation comments are retained. The header goes at the top of each file, after a shebang line if there is one and before inner attributes such as `#![doc = ...]` and `//!` documentation, where `rustfmt` leaves it unchanged. Commit new files before running the task if they should receive copyright headers. Every tracked Rust file receives a header, including test fixtures such as trybuild compile-fail cases under `tests/ui/`; regenerate their compiler-output snapshots, for trybuild with `TRYBUILD=overwrite cargo test`, after a header changes their line numbers.
+The task updates `license.md` and tracked Rust source headers, honoring `.mailmap` and `.git-blame-ignore-revs`. It skips bot accounts ending in `[bot]`. Existing Rust documentation comments are retained. The header goes at the top of each file, after any byte order mark and shebang line and before inner attributes such as `#![doc = ...]` and `//!` documentation, where `rustfmt` leaves it unchanged. Commit new files before running the task if they should receive copyright headers. Every tracked Rust file receives a header, including test fixtures such as trybuild compile-fail cases under `tests/ui/`; regenerate their compiler-output snapshots, for trybuild with `TRYBUILD=overwrite cargo test`, after a header changes their line numbers.
 
 Check that nothing needs updating, without writing any file:
 
