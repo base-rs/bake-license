@@ -1,6 +1,6 @@
 # Releases
 
-## Unreleased
+## v0.2.10
 
 - Declare Rust 1.88 as the minimum supported version in the package's `rust-version`, so Cargo reports an older toolchain clearly and resolves dependencies that support it; `bake` 0.20's `bake-macros` uses let chains, which need Rust 1.88, one release above the Base default. The test workflow checks the package with that version.
 - Write Rust license headers that `cargo fmt` leaves unchanged, so that a release's `license:update` no longer fails `cargo fmt --check`. The header now goes first, after any shebang and before inner attributes and `//!` documentation, since `rustfmt` removes the blank lines around a comment between inner attributes; an existing header after a leading `#![...]` attribute moves to the top on the next update. As `rustfmt` does, every updated source now ends at its last line, without trailing blank lines, and with a final line ending if it had none, so a file with nothing after its header no longer ends with a blank line, and a shebang on a source's last line, without a final line ending, is no longer followed directly by the header, without a blank line between them, until the next update. A `@generated` or "do not edit" comment after inner attributes now marks a source as generated when its license header comes before them, as it did when the header followed them.
