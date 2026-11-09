@@ -2,6 +2,8 @@
 // Copyright, 2026, by Samuel Williams.
 
 use crate::authorship::Copyright;
+use ra_ap_rustc_lexer::{Cursor, FrontmatterAllowed, LiteralKind, TokenKind};
+use std::iter::Peekable;
 use std::ops::Range;
 
 /// Write the license header at the top of the source, after any byte order mark and shebang and before inner attributes and documentation, replacing the license metadata in its leading comments.
@@ -12,7 +14,7 @@ pub(crate) fn update_source(contents: &str, copyrights: &[Copyright]) -> String 
     let lines: Vec<&str> = contents.split_inclusive('\n').collect();
     let newline = line_ending(contents);
     let shebang_length = shebang_length(contents);
-    let leading = leading_parts(&lines, shebang_length);
+    let leading = leading_parts(contents, &lines, shebang_length);
 
     let mut remainder: Vec<&str> = Vec::new();
     // As 0.2.9 and earlier, remove license metadata in documentation comments only among the leading comments directly after the shebang and the inner attributes that start the source: documentation comments after a block comment, or after an inner attribute that follows comments or blank lines, are the crate's documentation, and are kept.
@@ -21,31 +23,33 @@ pub(crate) fn update_source(contents: &str, copyrights: &[Copyright]) -> String 
     let mut after_comment = false;
     let mut skips_blank_lines = false;
     for part in &leading {
-        let line = lines[part.start];
-        if !is_blank(line) && !is_comment(line) {
-            // Keep inner attributes and block comments verbatim, including any lines inside them that look like comments.
-            if after_comment || !is_inner_attribute(line) {
-                removes_documentation = false;
+        let line = lines[part.lines.start];
+        let documentation = match part.kind {
+            PartKind::Blank => false,
+            PartKind::LineComment { documentation } => documentation,
+            PartKind::InnerAttribute | PartKind::BlockComment => {
+                // Keep inner attributes and block comments verbatim, including any lines inside them that look like comments.
+                if after_comment || part.kind == PartKind::BlockComment {
+                    removes_documentation = false;
+                }
+                remainder.extend(&lines[part.lines.clone()]);
+                skips_blank_lines = false;
+                continue;
             }
-            remainder.extend(&lines[part.clone()]);
-            skips_blank_lines = false;
-            continue;
-        }
+        };
         after_comment = true;
-        if skips_blank_lines && is_blank(line) {
+        if skips_blank_lines && part.kind == PartKind::Blank {
             continue;
         }
         skips_blank_lines = false;
-        if is_license_metadata(clean_line(line))
-            && (removes_documentation || !is_documentation_comment(line))
-        {
+        if is_license_metadata(clean_line(line)) && (removes_documentation || !documentation) {
             // Remove the metadata, and the blank lines that separated it from what follows when it was separated from what precedes it too, so a blank line between kept comments and code remains.
             skips_blank_lines = remainder.last().is_none_or(|line| is_blank(line));
             continue;
         }
         remainder.push(line);
     }
-    let body = leading.last().map_or(shebang_length, |part| part.end);
+    let body = leading.last().map_or(shebang_length, |part| part.lines.end);
     remainder.extend(&lines[body..]);
 
     let start = remainder
@@ -98,171 +102,222 @@ fn push_line(output: &mut String, line: &str, newline: &str) {
     }
 }
 
-/// Count the shebang line, which must stay first, if there is one: a source starting with `#!` is an inner attribute instead when `[` follows, after optional whitespace.
+/// Count the shebang line, which must stay first, if there is one: as rustc decides, a source starting with `#!` is an inner attribute instead when `[` is the next token, after whitespace and comments.
 fn shebang_length(contents: &str) -> usize {
-    usize::from(
-        contents
-            .strip_prefix("#!")
-            .is_some_and(|rest| !rest.trim_start().starts_with('[')),
-    )
+    usize::from(ra_ap_rustc_lexer::strip_shebang(contents).is_some())
+}
+
+/// What a part of the leading section is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PartKind {
+    /// A line holding only whitespace.
+    Blank,
+    /// A line holding only a `//` comment, which is documentation when rustc reads it so, as `///` or `//!`, but not `////`.
+    LineComment { documentation: bool },
+    /// An inner attribute, with any comments after it on its last line.
+    InnerAttribute,
+    /// A block comment, with any comments after it on its last line.
+    BlockComment,
+}
+
+/// A part of the leading section: the lines it spans and what it is.
+#[derive(Debug, PartialEq, Eq)]
+struct Part {
+    lines: Range<usize>,
+    kind: PartKind,
+}
+
+/// A token other than whitespace, as rustc's lexer reads it, and the bytes of the source it spans.
+struct Token {
+    kind: TokenKind,
+    span: Range<usize>,
 }
 
 /// Split the leading section after the shebang, before the first item, into its parts: each blank line and `//` comment, and each inner attribute and block comment, which may span several lines.
-fn leading_parts(lines: &[&str], start: usize) -> Vec<Range<usize>> {
+///
+/// rustc's lexer reads the source, so brackets, quotes and comment markers in strings, char literals and comments are never mistaken for the structure around them. The section ends at the first line that starts with anything else, at an attribute or block comment that code follows on its last line, and at one that the lexer cannot end: an unterminated literal or comment, or unbalanced delimiters, which rustc rejects. That part and everything after it are kept as they are.
+fn leading_parts(contents: &str, lines: &[&str], start: usize) -> Vec<Part> {
+    let line_starts: Vec<usize> = lines
+        .iter()
+        .scan(0, |offset, line| {
+            let start = *offset;
+            *offset += line.len();
+            Some(start)
+        })
+        .collect();
+    let offset = line_starts.get(start).copied().unwrap_or(contents.len());
+    let mut tokens = tokenize(contents, offset)
+        .filter(|token| token.kind != TokenKind::Whitespace)
+        .peekable();
+
     let mut parts = Vec::new();
-    let mut index = start;
-    while let Some(line) = lines.get(index) {
-        let end = if is_blank(line) || is_comment(line) {
-            Some(index + 1)
-        } else if is_inner_attribute(line) || line.trim_start().starts_with("/*") {
-            span_end(lines, index)
-        } else {
-            None
+    for (index, line) in lines.iter().enumerate().skip(start) {
+        if parts
+            .last()
+            .is_some_and(|part: &Part| part.lines.end > index)
+        {
+            continue;
+        }
+        let line_end = line_starts[index] + line.len();
+        let Some(token) = tokens.next_if(|token| token.span.start < line_end) else {
+            parts.push(Part {
+                lines: index..index + 1,
+                kind: PartKind::Blank,
+            });
+            continue;
         };
-        let Some(end) = end else {
+        let (kind, end) = match token.kind {
+            TokenKind::LineComment { doc_style } => {
+                parts.push(Part {
+                    lines: index..index + 1,
+                    kind: PartKind::LineComment {
+                        documentation: doc_style.is_some(),
+                    },
+                });
+                continue;
+            }
+            TokenKind::BlockComment {
+                terminated: true, ..
+            } => (PartKind::BlockComment, token.span.end),
+            TokenKind::Pound => match inner_attribute_end(&mut tokens) {
+                Some(end) => (PartKind::InnerAttribute, end),
+                None => break,
+            },
+            _ => break,
+        };
+        let Some(end) = end_of_line(contents, &mut tokens, end) else {
             break;
         };
-        parts.push(index..end);
-        index = end;
+        // The line holding the last byte of the part, and any comments after it, is its last.
+        let last = line_starts.partition_point(|&start| start < end) - 1;
+        parts.push(Part {
+            lines: index..last + 1,
+            kind,
+        });
     }
     parts
 }
 
-/// The lexical context of a character in [`span_end`].
-enum Context {
-    Code,
-    String,
-    /// A raw string, closed by `"` and this many `#`.
-    RawString(usize),
-    /// Block comments, which nest, at this depth.
-    BlockComment(usize),
+/// Read the tokens of the source from `offset`, as rustc's parser reads them from its lexer.
+fn tokenize(contents: &str, mut offset: usize) -> impl Iterator<Item = Token> {
+    // As before, frontmatter is not recognized, so it ends the leading section.
+    let mut cursor = Cursor::new(&contents[offset..], FrontmatterAllowed::No);
+    std::iter::from_fn(move || {
+        let token = cursor.advance_token();
+        let start = offset;
+        match token.kind {
+            TokenKind::Eof => return None,
+            // The prefix reserved for guarded strings, `#"` or `##`, is an error from Rust 2024, and earlier a `#`, after which rustc lexes again. Do the same, so that `#"]"#` is read as `#`, `"]"` and `#` rather than as an unterminated string after `#"`.
+            TokenKind::GuardedStrPrefix => {
+                offset += 1;
+                cursor = Cursor::new(&contents[offset..], FrontmatterAllowed::No);
+                return Some(Token {
+                    kind: TokenKind::Pound,
+                    span: start..offset,
+                });
+            }
+            _ => offset += token.len as usize,
+        }
+        Some(Token {
+            kind: token.kind,
+            span: start..offset,
+        })
+    })
 }
 
-/// Find the line after the inner attribute or block comment starting at `start`, which may span several lines, ignoring brackets in strings, char and byte literals, and comments. Returns `None` when it is unterminated, or code follows it on its last line, so the leading section ends before it.
-fn span_end(lines: &[&str], start: usize) -> Option<usize> {
-    let mut context = Context::Code;
-    let mut open_brackets = 0usize;
-    // Whether code starts the span, so that it is an attribute, which ends at its closing bracket rather than at the end of a comment before it.
-    let mut started = false;
-    let mut closed = false;
-    // The `#` counted since an `r` that may start a raw string.
-    let mut raw_hashes = None;
-    for (index, line) in lines.iter().enumerate().skip(start) {
-        let mut characters = clean_line(line).chars().peekable();
-        while let Some(character) = characters.next() {
-            match context {
-                Context::String => match character {
-                    '\\' => {
-                        characters.next();
-                    }
-                    '"' => context = Context::Code,
-                    _ => {}
-                },
-                Context::RawString(hashes) => {
-                    if character == '"'
-                        && (0..hashes).all(|_| characters.next_if_eq(&'#').is_some())
-                    {
-                        context = Context::Code;
-                    }
+/// Read the rest of an inner attribute after its `#`: `!`, then `[` and the tokens through its matching `]`, returning the end of that bracket. Returns `None` when it is not an inner attribute, or its delimiters are unbalanced or a literal or comment in it is unterminated.
+fn inner_attribute_end(tokens: &mut Peekable<impl Iterator<Item = Token>>) -> Option<usize> {
+    let mut code =
+        tokens.filter(|token| !is_comment_token(token.kind) || is_unterminated(token.kind));
+    if code.next()?.kind != TokenKind::Bang || code.next()?.kind != TokenKind::OpenBracket {
+        return None;
+    }
+    let mut open = vec![TokenKind::CloseBracket];
+    for token in code {
+        match token.kind {
+            TokenKind::OpenParen => open.push(TokenKind::CloseParen),
+            TokenKind::OpenBrace => open.push(TokenKind::CloseBrace),
+            TokenKind::OpenBracket => open.push(TokenKind::CloseBracket),
+            TokenKind::CloseParen | TokenKind::CloseBrace | TokenKind::CloseBracket => {
+                if open.pop() != Some(token.kind) {
+                    return None;
                 }
-                Context::BlockComment(depth) => {
-                    if character == '*' && characters.next_if_eq(&'/').is_some() {
-                        context = if depth == 1 {
-                            closed |= !started;
-                            Context::Code
-                        } else {
-                            Context::BlockComment(depth - 1)
-                        };
-                    } else if character == '/' && characters.next_if_eq(&'*').is_some() {
-                        context = Context::BlockComment(depth + 1);
-                    }
-                }
-                Context::Code => {
-                    if character == '/' && characters.next_if_eq(&'/').is_some() {
-                        // The rest of the line is a comment.
-                        break;
-                    }
-                    if character == '/' && characters.next_if_eq(&'*').is_some() {
-                        context = Context::BlockComment(1);
-                        continue;
-                    }
-                    if character.is_whitespace() {
-                        raw_hashes = None;
-                        continue;
-                    }
-                    if closed {
-                        return None;
-                    }
-                    started = true;
-                    let prefix_hashes = raw_hashes.take();
-                    match character {
-                        'r' => raw_hashes = Some(0),
-                        '#' => raw_hashes = prefix_hashes.map(|hashes| hashes + 1),
-                        '"' => {
-                            context = prefix_hashes.map_or(Context::String, Context::RawString);
-                        }
-                        '\'' => {
-                            // A char or byte literal, such as `'['` or `b'\''`, is an escape, or one character and its closing quote; otherwise the quote starts a lifetime or label, such as `'static`, whose name the scan reads as code.
-                            let mut lookahead = characters.clone();
-                            match lookahead.next() {
-                                Some('\\') => {
-                                    // Skip the escaped character, which may be a quote, and the rest of a `\x` or `\u{...}` escape, through the closing quote.
-                                    characters.nth(1);
-                                    while characters.next().is_some_and(|next| next != '\'') {}
-                                }
-                                Some(_) if lookahead.next() == Some('\'') => characters = lookahead,
-                                _ => {}
-                            }
-                        }
-                        '[' => open_brackets += 1,
-                        ']' => {
-                            open_brackets = open_brackets.saturating_sub(1);
-                            closed = open_brackets == 0;
-                        }
-                        _ => {}
-                    }
+                if open.is_empty() {
+                    return Some(token.span.end);
                 }
             }
-        }
-        if closed && matches!(context, Context::Code) {
-            return Some(index + 1);
+            kind if is_unterminated(kind) => return None,
+            _ => {}
         }
     }
     None
 }
 
-/// Whether the leading comments mark the file as generated, so its generator owns the contents. Only plain `//` comments among the leading comments, inner attributes and block comments after any shebang count, never documentation comments or lines inside attributes and block comments: either the conventional `@generated` marker, or a comment ending "do not edit", as Bake's task registry does.
+/// Read the comments after the part ending at `end` on its last line, returning the end of the last of them, or `end`. Returns `None` when code, or an unterminated comment, follows on that line.
+fn end_of_line(
+    contents: &str,
+    tokens: &mut Peekable<impl Iterator<Item = Token>>,
+    mut end: usize,
+) -> Option<usize> {
+    while let Some(token) = tokens.next_if(|token| !contents[end..token.span.start].contains('\n'))
+    {
+        if !is_comment_token(token.kind) || is_unterminated(token.kind) {
+            return None;
+        }
+        end = token.span.end;
+    }
+    Some(end)
+}
+
+fn is_comment_token(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::LineComment { .. } | TokenKind::BlockComment { .. }
+    )
+}
+
+/// Whether the token is a literal or block comment without its end, which runs to the end of the source.
+fn is_unterminated(kind: TokenKind) -> bool {
+    match kind {
+        TokenKind::BlockComment { terminated, .. } => !terminated,
+        TokenKind::Literal { kind, .. } => match kind {
+            LiteralKind::Char { terminated }
+            | LiteralKind::Byte { terminated }
+            | LiteralKind::Str { terminated }
+            | LiteralKind::ByteStr { terminated }
+            | LiteralKind::CStr { terminated } => !terminated,
+            LiteralKind::RawStr { n_hashes }
+            | LiteralKind::RawByteStr { n_hashes }
+            | LiteralKind::RawCStr { n_hashes } => n_hashes.is_none(),
+            LiteralKind::Int { .. } | LiteralKind::Float { .. } => false,
+        },
+        _ => false,
+    }
+}
+
+/// Whether the leading comments mark the file as generated, so its generator owns the contents. Only plain `//` comments among the leading comments, inner attributes and block comments after any shebang count, never documentation comments or comments inside or after attributes and block comments: either the conventional `@generated` marker, or a comment ending "do not edit", as Bake's task registry does.
 pub(crate) fn is_generated(contents: &str) -> bool {
     let (_, contents) = split_byte_order_mark(contents);
     let lines: Vec<&str> = contents.split_inclusive('\n').collect();
-    leading_parts(&lines, shebang_length(contents))
+    leading_parts(contents, &lines, shebang_length(contents))
         .into_iter()
-        .map(|part| lines[part.start])
-        .filter(|line| is_comment(line) && !is_documentation_comment(line))
-        .any(|line| {
-            let line = clean_line(line).trim().to_ascii_lowercase();
+        .filter(|part| {
+            part.kind
+                == PartKind::LineComment {
+                    documentation: false,
+                }
+        })
+        .any(|part| {
+            let line = clean_line(lines[part.lines.start])
+                .trim()
+                .to_ascii_lowercase();
             line.contains("@generated") || line.trim_end_matches('.').ends_with("do not edit")
         })
 }
 
+/// Whether the line holds only whitespace, as rustc's lexer reads it, so that other blank-looking lines, such as a no-break space, which rustc rejects, are kept.
 fn is_blank(line: &str) -> bool {
-    line.trim().is_empty()
-}
-
-fn is_comment(line: &str) -> bool {
-    line.trim_start().starts_with("//")
-}
-
-fn is_documentation_comment(line: &str) -> bool {
-    let line = line.trim_start();
-    line.starts_with("///") || line.starts_with("//!")
-}
-
-/// Whether the line starts an inner attribute: `#!` followed by `[`, after optional whitespace.
-fn is_inner_attribute(line: &str) -> bool {
-    line.trim_start()
-        .strip_prefix("#!")
-        .is_some_and(|rest| rest.trim_start().starts_with('['))
+    line.chars().all(ra_ap_rustc_lexer::is_whitespace)
 }
 
 fn is_license_metadata(line: &str) -> bool {
@@ -327,6 +382,8 @@ mod tests {
         assert!(!is_generated(
             "// Do not edit this list by hand; run `x` instead.\nfn main() {}\n"
         ));
+        // As rustc reads it, four slashes start a plain comment rather than documentation.
+        assert!(is_generated("//// @generated by a tool.\nfn main() {}\n"));
     }
 
     /// Update twice, asserting the result and that a second update leaves it unchanged.
@@ -634,6 +691,84 @@ mod tests {
     }
 
     #[test]
+    fn reads_inner_attributes_as_rustc_lexes_them() {
+        for attribute in [
+            // A literal's suffix or a raw identifier before a string with an escaped quote, rather than a raw string prefix.
+            "#![a(1r\"\\\"]\")]\n",
+            "#![a(\"\"r\"\\\"]\")]\n",
+            "#![a(r#bar\"\\\"]\")]\n",
+            "#![a(r#r\"\\\"[\")]\n",
+            // Raw strings with hashes, holding quotes and brackets.
+            "#![doc = r##\"[ \"# ]\"##]\n",
+            "#![doc = br#\"[\"#]\n",
+            "#![a(b\"]\", c\"[\", cr#\"]\"#)]\n",
+            // Before Rust 2024, a `#` before a string, or another `#`, rather than a guarded string prefix.
+            "#![a(#\"]\"#)]\n",
+            "#![a(##)]\n",
+            // Multibyte text.
+            "#![doc = \"日本語 ]\"] // ü [\n",
+            "#![a('日', ']')]\n",
+            // Comments and line breaks between tokens.
+            "#!\n[allow(dead_code)]\n",
+            "#! // A comment.\n[allow(dead_code)]\n",
+            "# /* ] */ ! [allow(dead_code)]\n",
+            "#![allow(\n    dead_code, // ]\n    /* [ */\n)]\n",
+            "#![allow(dead_code)] /* ] */ // [\n",
+        ] {
+            let body = "fn main() {}\n\n// Copyright, 2001, by Someone.\n";
+            assert_updates_to(
+                &format!("{attribute}// Copyright, 2018, by Previous Author.\n\n{body}"),
+                &format!("{HEADER}\n{attribute}\n{body}"),
+            );
+            assert!(
+                is_generated(&format!(
+                    "{attribute}// @generated by a tool.\nfn main() {{}}\n"
+                )),
+                "{attribute:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_what_rustc_cannot_lex_after_the_header() {
+        // Each ends the leading section, so the source from it on is kept as it was, including the old metadata after it.
+        for attribute in [
+            // Unterminated literals and comments, which run to the end of the source.
+            "#![doc = \"unterminated]\n",
+            "#![doc = r#\"unterminated\"]\n",
+            "#![a('[)]\n",
+            "#![a /* unterminated ]\n",
+            "#![allow(dead_code)] /* unterminated\n",
+            // Unbalanced delimiters.
+            "#![a(]\n",
+            "#![a)]\n",
+            "#![a(\n",
+            // A no-break space, which is not whitespace in Rust.
+            "\u{a0}\n",
+            // Not inner attributes.
+            "#[derive(Debug)]\n",
+            "// A comment.\n#!a\n",
+        ] {
+            let body = "fn main() {}\n\n// Copyright, 2001, by Someone.\n";
+            let source = format!("{attribute}// Copyright, 2018, by Previous Author.\n\n{body}");
+            assert_updates_to(&source, &format!("{HEADER}\n{source}"));
+            assert!(
+                !is_generated(&format!(
+                    "{attribute}// @generated by a tool.\nfn main() {{}}\n"
+                )),
+                "{attribute:?}"
+            );
+        }
+        // A source ending in an attribute's `#` or `#!`.
+        for end in ["#", "#!"] {
+            assert_updates_to(
+                &format!("// Copyright, 2018, by Previous Author.\n{end}"),
+                &format!("{HEADER}\n{end}\n"),
+            );
+        }
+    }
+
+    #[test]
     fn keeps_license_metadata_in_the_code() {
         let body = "fn main() {\n    // Copyright, 2001, by Someone.\n}\n";
         assert_updates_to(body, &format!("{HEADER}\n{body}"));
@@ -718,6 +853,8 @@ mod tests {
         ));
         assert_eq!(shebang_length("#!\t[allow(dead_code)]\n"), 0);
         assert_eq!(shebang_length("#!/usr/bin/env rustx\n"), 1);
+        // As rustc decides, comments may separate the `#!` of an attribute from its `[`.
+        assert_eq!(shebang_length("#! // A comment.\n[allow(dead_code)]\n"), 0);
     }
 
     #[test]
