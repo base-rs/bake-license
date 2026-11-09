@@ -7,4 +7,4 @@ publish = false
 [dependencies]
 bake = ">=0.20, <1"
 bake-cargo = "0.9.1"
-base-project = ">=0.1.7"
+base-project = ">=0.1.8"
