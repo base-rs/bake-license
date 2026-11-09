@@ -6,19 +6,19 @@ use ra_ap_rustc_lexer::{Cursor, FrontmatterAllowed, LiteralKind, TokenKind};
 use std::iter::Peekable;
 use std::ops::Range;
 
-/// Write the license header at the top of the source, after any byte order mark and shebang and before inner attributes and documentation, replacing the license metadata in its leading comments.
+/// Write the license header at the top of the source, after any byte order mark, shebang and frontmatter and before inner attributes and documentation, replacing the license metadata in its leading comments.
 ///
 /// rustfmt removes the blank lines around a comment that sits between inner attributes, including `//!` documentation, so a header placed after a leading `#![...]` attribute is not stable under formatting when more follow. Placing it first is, and the source after it is kept as it was, apart from the removed metadata, the blank lines that separated it, and the blank lines at its end, which rustfmt removes.
 pub(crate) fn update_source(contents: &str, copyrights: &[Copyright]) -> String {
     let (byte_order_mark, contents) = split_byte_order_mark(contents);
     let lines: Vec<&str> = contents.split_inclusive('\n').collect();
     let newline = line_ending(contents);
-    let shebang_length = shebang_length(contents);
-    let leading = leading_parts(contents, &lines, shebang_length);
+    let prefix_length = prefix_length(contents, &lines);
+    let leading = leading_parts(contents, &lines, prefix_length);
 
     let mut remainder: Vec<&str> = Vec::new();
-    // As 0.2.9 and earlier, remove license metadata in documentation comments only among the leading comments directly after the shebang and the inner attributes that start the source: documentation comments after a block comment, or after an inner attribute that follows comments or blank lines, are the crate's documentation, and are kept.
-    let mut removes_documentation = true;
+    // As 0.2.9 and earlier, remove license metadata in documentation comments only among the leading comments directly after the shebang and the inner attributes that start the source: documentation comments after a block comment, or after an inner attribute that follows comments or blank lines, are the crate's documentation, and are kept. Keep them too when they make a `#!` that only comments separate from a `[` a shebang, so that removing them does not make it an inner attribute on the next update.
+    let mut removes_documentation = !is_shebang_by_documentation(contents);
     // Whether a blank line or comment has been seen, ending the inner attributes that start the source.
     let mut after_comment = false;
     let mut skips_blank_lines = false;
@@ -49,7 +49,7 @@ pub(crate) fn update_source(contents: &str, copyrights: &[Copyright]) -> String 
         }
         remainder.push(line);
     }
-    let body = leading.last().map_or(shebang_length, |part| part.lines.end);
+    let body = leading.last().map_or(prefix_length, |part| part.lines.end);
     remainder.extend(&lines[body..]);
 
     let start = remainder
@@ -64,8 +64,10 @@ pub(crate) fn update_source(contents: &str, copyrights: &[Copyright]) -> String 
     let remainder = &remainder[start..end];
 
     let mut output = String::from(byte_order_mark);
-    for line in &lines[..shebang_length] {
+    for line in &lines[..prefix_length] {
         push_line(&mut output, line, newline);
+    }
+    if prefix_length > 0 {
         output.push_str(newline);
     }
 
@@ -102,9 +104,63 @@ fn push_line(output: &mut String, line: &str, newline: &str) {
     }
 }
 
-/// Count the shebang line, which must stay first, if there is one: as rustc decides, a source starting with `#!` is an inner attribute instead when `[` is the next token, after whitespace and comments.
+/// Count the shebang line, which must stay first, if there is one: as rustc decides, a source starting with `#!` is an inner attribute instead when `[` is the next token, after whitespace and comments other than documentation.
 fn shebang_length(contents: &str) -> usize {
     usize::from(ra_ap_rustc_lexer::strip_shebang(contents).is_some())
+}
+
+/// Whether the source starts with a shebang only because of a documentation comment before a `[` that only comments separate from its `#!`: without that comment, as rustc decides, the `#!` would start an inner attribute.
+fn is_shebang_by_documentation(contents: &str) -> bool {
+    shebang_length(contents) == 1
+        && ra_ap_rustc_lexer::tokenize(&contents[2..], FrontmatterAllowed::No)
+            .find(|token| token.kind != TokenKind::Whitespace && !is_comment_token(token.kind))
+            .is_some_and(|token| token.kind == TokenKind::OpenBracket)
+}
+
+/// Count the lines that must stay before the header: the shebang, if there is one, and the frontmatter of a cargo script after it, the `---` fenced block that rustc requires to come first, with only whitespace before it.
+///
+/// Frontmatter whose closing fence the lexer does not find is not kept first, since the lexer's recovery for it can extend it over the header on the next update. rustc rejects it.
+fn prefix_length(contents: &str, lines: &[&str]) -> usize {
+    let shebang_length = shebang_length(contents);
+    let line_starts = line_starts(lines);
+    let mut end = line_starts
+        .get(shebang_length)
+        .copied()
+        .unwrap_or(contents.len());
+    for token in ra_ap_rustc_lexer::tokenize(&contents[end..], FrontmatterAllowed::Yes) {
+        let start = end;
+        end += token.len as usize;
+        match token.kind {
+            TokenKind::Whitespace => {}
+            TokenKind::Frontmatter {
+                has_invalid_preceding_whitespace: false,
+                ..
+            } => {
+                // The lexer ends frontmatter at the end of the line holding its closing fence, a line starting with as many dashes as its opening fence, when it finds one.
+                let frontmatter = &contents[start..end];
+                let fence =
+                    &frontmatter[..frontmatter.len() - frontmatter.trim_start_matches('-').len()];
+                if !frontmatter.contains(&format!("\n{fence}")) {
+                    break;
+                }
+                return line_starts.partition_point(|&start| start < end);
+            }
+            _ => break,
+        }
+    }
+    shebang_length
+}
+
+/// The byte offset of the start of each line.
+fn line_starts(lines: &[&str]) -> Vec<usize> {
+    lines
+        .iter()
+        .scan(0, |offset, line| {
+            let start = *offset;
+            *offset += line.len();
+            Some(start)
+        })
+        .collect()
 }
 
 /// What a part of the leading section is.
@@ -133,18 +189,11 @@ struct Token {
     span: Range<usize>,
 }
 
-/// Split the leading section after the shebang, before the first item, into its parts: each blank line and `//` comment, and each inner attribute and block comment, which may span several lines.
+/// Split the leading section after the shebang and frontmatter, before the first item, into its parts: each blank line and `//` comment, and each inner attribute and block comment, which may span several lines.
 ///
 /// rustc's lexer reads the source, so brackets, quotes and comment markers in strings, char literals and comments are never mistaken for the structure around them. The section ends at the first line that starts with anything else, at an attribute or block comment that code follows on its last line, and at one that the lexer cannot end: an unterminated literal or comment, or unbalanced delimiters, which rustc rejects. That part and everything after it are kept as they are.
 fn leading_parts(contents: &str, lines: &[&str], start: usize) -> Vec<Part> {
-    let line_starts: Vec<usize> = lines
-        .iter()
-        .scan(0, |offset, line| {
-            let start = *offset;
-            *offset += line.len();
-            Some(start)
-        })
-        .collect();
+    let line_starts = line_starts(lines);
     let offset = line_starts.get(start).copied().unwrap_or(contents.len());
     let mut tokens = tokenize(contents, offset)
         .filter(|token| token.kind != TokenKind::Whitespace)
@@ -200,7 +249,7 @@ fn leading_parts(contents: &str, lines: &[&str], start: usize) -> Vec<Part> {
 
 /// Read the tokens of the source from `offset`, as rustc's parser reads them from its lexer.
 fn tokenize(contents: &str, mut offset: usize) -> impl Iterator<Item = Token> {
-    // As before, frontmatter is not recognized, so it ends the leading section.
+    // Any frontmatter is before `offset`, and only allowed first, so it is not recognized from there.
     let mut cursor = Cursor::new(&contents[offset..], FrontmatterAllowed::No);
     std::iter::from_fn(move || {
         let token = cursor.advance_token();
@@ -276,7 +325,7 @@ fn is_comment_token(kind: TokenKind) -> bool {
     )
 }
 
-/// Whether the token is a literal or block comment without its end, which runs to the end of the source.
+/// Whether the token is a literal or block comment without its end, which runs to the end of the source, or a raw string with an invalid start, such as `r#~`, which rustc rejects.
 fn is_unterminated(kind: TokenKind) -> bool {
     match kind {
         TokenKind::BlockComment { terminated, .. } => !terminated,
@@ -295,11 +344,11 @@ fn is_unterminated(kind: TokenKind) -> bool {
     }
 }
 
-/// Whether the leading comments mark the file as generated, so its generator owns the contents. Only plain `//` comments among the leading comments, inner attributes and block comments after any shebang count, never documentation comments or comments inside or after attributes and block comments: either the conventional `@generated` marker, or a comment ending "do not edit", as Bake's task registry does.
+/// Whether the leading comments mark the file as generated, so its generator owns the contents. Only plain `//` comments among the leading comments, inner attributes and block comments after any shebang and frontmatter count, never documentation comments or comments inside or after attributes and block comments: either the conventional `@generated` marker, or a comment ending "do not edit", as Bake's task registry does.
 pub(crate) fn is_generated(contents: &str) -> bool {
     let (_, contents) = split_byte_order_mark(contents);
     let lines: Vec<&str> = contents.split_inclusive('\n').collect();
-    leading_parts(contents, &lines, shebang_length(contents))
+    leading_parts(contents, &lines, prefix_length(contents, &lines))
         .into_iter()
         .filter(|part| {
             part.kind
@@ -714,6 +763,8 @@ mod tests {
             "# /* ] */ ! [allow(dead_code)]\n",
             "#![allow(\n    dead_code, // ]\n    /* [ */\n)]\n",
             "#![allow(dead_code)] /* ] */ // [\n",
+            // Braces, as in a macro call.
+            "#![doc = concat!{\"]\", {\"[\"}}]\n",
         ] {
             let body = "fn main() {}\n\n// Copyright, 2001, by Someone.\n";
             assert_updates_to(
@@ -743,6 +794,12 @@ mod tests {
             "#![a(]\n",
             "#![a)]\n",
             "#![a(\n",
+            // Delimiters that balance in number but not in kind.
+            "#![a{)]\n",
+            // An unterminated char literal, with what would close the attribute on the next line.
+            "#![a('[)\n]\n",
+            // A raw string with an invalid start.
+            "#![a(r#~)]\n",
             // A no-break space, which is not whitespace in Rust.
             "\u{a0}\n",
             // Not inner attributes.
@@ -873,5 +930,78 @@ mod tests {
         }
         let rest = "#![allow(dead_code)]\n/* A comment. */\n//! Copyright, 2001, by Someone.\n";
         assert_updates_to(rest, &format!("{HEADER}\n{rest}"));
+    }
+
+    #[test]
+    fn keeps_frontmatter_first() {
+        let script =
+            "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n[dependencies]\nclap = \"4\"\n---\n";
+        // A shebang, frontmatter and inner attributes, with the header after the frontmatter, which rustc requires to come first.
+        assert_updates_to(
+            &format!("{script}#![allow(dead_code)]\n\nfn main() {{}}\n"),
+            &format!("{script}\n{HEADER}\n#![allow(dead_code)]\n\nfn main() {{}}\n"),
+        );
+        // Frontmatter without a shebang, with an infostring, longer fences, a fence inside it, and line breaks before it.
+        let frontmatter = "\n----cargo\n[package]\ndescription = \"\"\"\n---\n\"\"\"\n----\n";
+        assert_updates_to(
+            &format!("{frontmatter}fn main() {{}}\n"),
+            &format!("{frontmatter}\n{HEADER}\nfn main() {{}}\n"),
+        );
+        // An old header after frontmatter, as 0.2.9 and earlier wrote it, is replaced.
+        assert_updates_to(
+            "---\n[package]\n---\n// Released under the MIT License.\n// Copyright, 2018, by Previous Author.\n\n//! Documentation.\n\nfn main() {}\n",
+            &format!("---\n[package]\n---\n\n{HEADER}\n//! Documentation.\n\nfn main() {{}}\n"),
+        );
+        assert_updates_to(
+            "\u{feff}---\r\n[package]\r\n---",
+            &format!(
+                "\u{feff}---\r\n[package]\r\n---\r\n\r\n{}",
+                HEADER.replace('\n', "\r\n")
+            ),
+        );
+        assert!(is_generated(
+            "#!/usr/bin/env cargo\n---\n---\n// @generated by a tool.\nfn main() {}\n"
+        ));
+        assert!(!is_generated(
+            "---\n// @generated by a tool.\n---\nfn main() {}\n"
+        ));
+    }
+
+    #[test]
+    fn keeps_frontmatter_rustc_rejects_after_the_header() {
+        for frontmatter in [
+            // Without a closing fence as long as its opening one, which the lexer extends to the next line starting with `use`, `//!`, `#![` or dashes, or to the end of the source.
+            "----\n[package]\n---\n",
+            "---\n[package]\n",
+            // After something other than whitespace on its line, or after a comment.
+            " ---\n[package]\n---\n",
+            "// A comment.\n---\n[package]\n---\n",
+        ] {
+            let source =
+                format!("{frontmatter}// Copyright, 2018, by Previous Author.\nuse std::io;\n");
+            assert_updates_to(&source, &format!("{HEADER}\n{source}"));
+        }
+    }
+
+    #[test]
+    fn keeps_documentation_that_makes_a_shebang() {
+        // rustc reads `#!` as a shebang here only because of the documentation comment, which it then rejects; without it, the `#!` would start an inner attribute, so the comment is kept.
+        assert_updates_to(
+            "#!\n/// Copyright, 2018, by Previous Author.\n[a]\n",
+            &format!("#!\n\n{HEADER}\n/// Copyright, 2018, by Previous Author.\n[a]\n"),
+        );
+        assert_updates_to(
+            "#!\n// Copyright, 2018, by Previous Author.\n//! Copyright, 2018, by Previous Author.\n/* A comment. */\n[a]\n",
+            &format!(
+                "#!\n\n{HEADER}\n//! Copyright, 2018, by Previous Author.\n/* A comment. */\n[a]\n"
+            ),
+        );
+        assert!(is_shebang_by_documentation("#! /// A comment.\n[a]\n"));
+        assert!(!is_shebang_by_documentation(
+            "#!/usr/bin/env rustx\n/// A comment.\n"
+        ));
+        assert!(!is_shebang_by_documentation("#![allow(dead_code)]\n"));
+        assert!(!is_shebang_by_documentation("#!\n/// A comment.\n"));
+        assert!(!is_shebang_by_documentation("fn main() {}\n"));
     }
 }
