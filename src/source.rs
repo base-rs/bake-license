@@ -136,7 +136,7 @@ fn prefix_length(contents: &str, lines: &[&str]) -> usize {
                 has_invalid_preceding_whitespace: false,
                 ..
             } => {
-                // The lexer ends frontmatter at the end of the line holding its closing fence, a line starting with as many dashes as its opening fence, when it finds one.
+                // The lexer ends frontmatter at the end of the line holding its closing fence, a line starting with at least as many dashes as its opening fence, when it finds one.
                 let frontmatter = &contents[start..end];
                 let fence =
                     &frontmatter[..frontmatter.len() - frontmatter.trim_start_matches('-').len()];
