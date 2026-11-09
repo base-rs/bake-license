@@ -2,6 +2,7 @@
 name = "bake-license"
 version = "0.2.9"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/base-rs/bake-license"
 description = "License and copyright maintenance tasks for Bake"
