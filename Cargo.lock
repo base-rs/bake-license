@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "bake-license"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "bake",
  "base-markdown",
