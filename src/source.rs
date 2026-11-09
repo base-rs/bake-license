@@ -145,10 +145,10 @@ fn span_end(lines: &[&str], start: usize) -> Option<usize> {
     // Whether code starts the span, so that it is an attribute, which ends at its closing bracket rather than at the end of a comment before it.
     let mut started = false;
     let mut closed = false;
-    // The `#` counted since an `r` that may start a raw string.
-    let mut raw_hashes = None;
     for (index, line) in lines.iter().enumerate().skip(start) {
         let mut characters = clean_line(line).chars().peekable();
+        // The `#` counted since an `r` that may start a raw string, which it does only when the `"` follows in the same token, so the line's end clears it.
+        let mut raw_hashes = None;
         while let Some(character) = characters.next() {
             match context {
                 Context::String => match character {
@@ -178,6 +178,8 @@ fn span_end(lines: &[&str], start: usize) -> Option<usize> {
                     }
                 }
                 Context::Code => {
+                    // As in Rust's lexer, the prefix applies only to the character that follows it, so whitespace and comments end it.
+                    let prefix_hashes = raw_hashes.take();
                     if character == '/' && characters.next_if_eq(&'/').is_some() {
                         // The rest of the line is a comment.
                         break;
@@ -187,14 +189,12 @@ fn span_end(lines: &[&str], start: usize) -> Option<usize> {
                         continue;
                     }
                     if character.is_whitespace() {
-                        raw_hashes = None;
                         continue;
                     }
                     if closed {
                         return None;
                     }
                     started = true;
-                    let prefix_hashes = raw_hashes.take();
                     match character {
                         'r' => raw_hashes = Some(0),
                         '#' => raw_hashes = prefix_hashes.map(|hashes| hashes + 1),
@@ -574,6 +574,11 @@ mod tests {
             ("#![doc = \"[ \\\" [\"]\n", ""),
             ("#![doc = r#\"[ \"quoted\" \\\"#]\n", ""),
             ("#![doc = br\"[\\\"]\n", ""),
+            // An identifier ending in `r`, before a string after a line break or comment, which does not start a raw string.
+            ("#![a(m!(r\n\"\\\"]\" x))]\n", ""),
+            ("#![a(m!(br\n\"\\\"]\" x))]\n", ""),
+            ("#![a(m!(r/**/\"\\\"]\" x))]\n", ""),
+            ("#![a(m!(r// See [\n\"\\\"]\" x))]\n", ""),
             ("#![allow(dead_code)] // See [the guide.\n", ""),
             ("#![allow(dead_code)] /* See [ /* nested [ */ */\n", ""),
             ("#![allow(dead_code)] /* See\n[the guide. */\n", ""),
@@ -610,6 +615,7 @@ mod tests {
             "#![a(c = ']')]\n",
             "#![a(c = '[')]\n",
             "#![a(c = '\"')]\n",
+            "#![a(c = ['🦀', 'é', ']'])]\n",
             // Escapes, whose closing quote does not follow the first character after the opening quote.
             "#![a(c = ['\\'',']'])]\n",
             "#![a(c = ['\\\\',']'])]\n",
